@@ -72,6 +72,7 @@ function renderWhitelist(wl, filterText){
   for (const d of domains){
     if (f && !d.includes(f)) continue;
     const enabled = !!wl[d];
+    const isCustom = !POPULAR.some(p => p.d === d);
 
     const row = document.createElement('div');
     row.className = 'wlItem';
@@ -80,7 +81,10 @@ function renderWhitelist(wl, filterText){
         <div class="domain">${d}</div>
         <div class="tag">${merged.get(d) || ''}</div>
       </div>
-      <div class="toggle ${enabled?'on':''}" data-domain="${d}"><div class="knob"></div></div>
+      <div class="wlActions">
+        <div class="toggle ${enabled?'on':''}" data-domain="${d}"><div class="knob"></div></div>
+        ${isCustom ? `<button class="wlRemove" data-remove="${d}" title="Remove">Remove</button>` : ''}
+      </div>
     `;
     list.appendChild(row);
   }
@@ -90,6 +94,18 @@ function renderWhitelist(wl, filterText){
       const d = t.getAttribute('data-domain');
       const on = !t.classList.contains('on');
       t.classList.toggle('on', on);
+    });
+  });
+
+  list.querySelectorAll('.wlRemove[data-remove]').forEach(btn=>{
+    btn.addEventListener('click', async (e)=>{
+      e.stopPropagation();
+      const d = btn.getAttribute('data-remove');
+      if (!d) return;
+      const s2 = await loadSettings();
+      delete s2.whitelist[d];
+      await saveSettings(s2);
+      renderWhitelist(s2.whitelist, f);
     });
   });
 }

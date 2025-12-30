@@ -76,8 +76,9 @@ function makeToast(text){
     background: rgba(20,18,24,.92); color: #fff; border: 1px solid rgba(255,255,255,.18);
     padding: 10px 12px; border-radius: 14px; font: 12px/1.2 system-ui;
     box-shadow: 0 16px 40px rgba(0,0,0,.35); backdrop-filter: blur(8px);
+    pointer-events: none;
   `;
-  document.documentElement.appendChild(el);
+  (document.body || document.documentElement).appendChild(el);
   setTimeout(()=>{ el.style.opacity='0'; el.style.transition='opacity .25s ease'; }, 1600);
   setTimeout(()=>el.remove(), 2000);
 }
@@ -116,7 +117,7 @@ function sparkle(rect){
     root.appendChild(s);
   }
 
-  document.documentElement.appendChild(root);
+  (document.body || document.documentElement).appendChild(root);
   setTimeout(()=>root.remove(), 900);
 }
 
@@ -389,6 +390,19 @@ async function enhanceViaHost(srcUrl){
 
 // ---------- Replace in page ----------
 function replaceImgSrc(imgEl, dataUrl){
+  const rect = imgEl.getBoundingClientRect();
+  const hasSizing = !!(imgEl.style.width || imgEl.style.height || imgEl.getAttribute('width') || imgEl.getAttribute('height'));
+  if (!imgEl.dataset.muStyleWidth) {
+    imgEl.dataset.muStyleWidth = imgEl.style.width || '';
+  }
+  if (!imgEl.dataset.muStyleHeight) {
+    imgEl.dataset.muStyleHeight = imgEl.style.height || '';
+  }
+  if (!hasSizing && rect.width > 0 && rect.height > 0) {
+    imgEl.style.width = `${Math.round(rect.width)}px`;
+    imgEl.style.height = `${Math.round(rect.height)}px`;
+    imgEl.style.objectFit = 'contain';
+  }
   imgEl.dataset.muOriginalSrc = imgEl.dataset.muOriginalSrc || imgEl.src;
   imgEl.src = dataUrl;
   imgEl.style.imageRendering = 'auto';
@@ -442,13 +456,16 @@ async function processImageElement(imgEl){
   }
 }
 
-async function processOnce(preload){
+async function processOnce(preload, showStatus){
   if (!settings.enabled) return;
   if (!hostAllowed()) return;
 
   if (busy) return;
   busy = true;
   try{
+    if (showStatus){
+      makeToast(preload ? 'Enhancing + preload...' : 'Enhancing...');
+    }
     const img = findBestVisibleImage();
     if (!img) { makeToast('No panel found'); return; }
 
@@ -514,7 +531,7 @@ chrome.runtime.onMessage.addListener((msg) => {
     loadSettings().then(()=>{ /* re-eval */ }).catch(()=>{});
   }
   if (msg?.type === 'RUN_ONCE') {
-    processOnce(!!msg.preload);
+    processOnce(!!msg.preload, true);
   }
 });
 

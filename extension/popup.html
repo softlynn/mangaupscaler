@@ -69,19 +69,8 @@
     button.primary{ background: linear-gradient(135deg, rgba(255,127,200,.95), rgba(165,139,255,.95)); border:none; color:#120b12; }
     button:active{ transform: translateY(1px); }
     .tiny{ margin-top:8px; color:var(--muted); font-size:11px; }
-    .secretDot{
-      width:10px; height:10px; border-radius:99px; background:rgba(255,255,255,.08);
-      border:1px solid rgba(255,255,255,.10);
-      margin-left:auto; cursor:pointer;
-    }
-    .credits{ display:none; margin-top:10px; padding-top:10px; border-top:1px dashed rgba(255,255,255,.14); }
-    .credits.show{ display:block; }
+    .credits{ margin-top:10px; padding-top:10px; border-top:1px dashed rgba(255,255,255,.14); }
     .creditRow{ display:flex; align-items:center; gap:10px; }
-    .pfp{
-      width:18px; height:18px; border-radius:99px; overflow:hidden; opacity:.55;
-      border:1px solid rgba(255,255,255,.18);
-    }
-    .pfp img{ width:100%; height:100%; object-fit:cover; display:block; }
     a.linkbtn{
       display:inline-flex; align-items:center; justify-content:center;
       padding:8px 10px; border-radius:12px; border:1px solid rgba(255,255,255,.14);
@@ -110,7 +99,6 @@
         <h1 id="title">Manga Upscaler</h1>
         <div class="sub">Sharper text - crisp screentones - fewer artifacts</div>
       </div>
-      <div id="secretDot" class="secretDot" title="..."></div>
     </div>
 
     <div class="card">
@@ -180,12 +168,13 @@
 
       <div id="credits" class="credits">
         <div class="creditRow">
-          <div class="pfp small"><img src="assets/creator.png" alt="" /></div>
           <div style="flex:1">
             <div style="font-weight:800; font-size:12px;">Softlynn</div>
-            <div style="color:var(--muted); font-size:11px;">secret credits</div>
+            <div style="color:var(--muted); font-size:11px;">Creator</div>
           </div>
-          <div class="pfp big"><img src="assets/heartgray2x.png" alt="" /></div>
+          <div style="width:18px; height:18px; border-radius:99px; overflow:hidden; opacity:.7; border:1px solid rgba(255,255,255,.18);">
+            <img src="assets/heartgray2x.png" alt="" style="width:100%; height:100%; object-fit:cover; display:block;" />
+          </div>
         </div>
         <div style="display:flex; gap:10px; margin-top:10px;">
           <a class="linkbtn" id="siteLink" href="#">Website</a>

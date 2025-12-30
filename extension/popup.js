@@ -27,8 +27,6 @@ const dnVal = $('dnVal');
 const run = $('run');
 const runPrimary = $('runPrimary');
 
-const credits = $('credits');
-const secretDot = $('secretDot');
 const siteLink = $('siteLink');
 const supportLink = $('supportLink');
 const openSettings = $('openSettings');
@@ -230,8 +228,4 @@ runPrimary.addEventListener('click', async ()=>{
   window.close();
 });
 
-// Secret credits: click the dot 7 times
-secretDot.addEventListener('click', ()=>{
-  credits.classList.toggle('show');
-});
 load().catch(console.error);

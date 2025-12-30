@@ -745,6 +745,17 @@ def enhance_bytes(img_bytes: bytes, scale: int, quality: str | None) -> tuple[by
   return buf.getvalue(), label
 
 class Handler(BaseHTTPRequestHandler):
+  def log_message(self, fmt, *args):
+    try:
+      if self.path.startswith("/health"):
+        return
+    except Exception:
+      pass
+    try:
+      _log(fmt % args)
+    except Exception:
+      pass
+
   def _send(self, code: int, body: bytes, ctype: str="text/plain", extra_headers: dict|None=None):
     self.send_response(code)
     self.send_header("Content-Type", ctype)
