@@ -1,5 +1,6 @@
 .vs/
 .git_backup/
+inspiration/
 
 native_host/.venv/
 native_host/cache/

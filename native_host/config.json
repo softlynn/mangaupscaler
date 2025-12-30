@@ -35,5 +35,12 @@
   },
   "default_scale": 2,
   "default_quality": "balanced",
-  "use_fp16": true
+  "use_fp16": true,
+  "grayscale_detection_threshold": 12,
+  "residual_add": false,
+  "residual_add_patterns": [
+    "mangajanai",
+    "illustrationjanai"
+  ],
+  "residual_add_strength": 0.5
 }

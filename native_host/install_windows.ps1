@@ -1,7 +1,7 @@
 # Manga Upscaler Local Host installer (Windows)
 # Run in PowerShell:  .\install_windows.ps1
 $ErrorActionPreference = "Stop"
-cd $PSScriptRoot
+Set-Location $PSScriptRoot
 
 if (-not (Test-Path ".venv")) {
   py -3.10 -m venv .venv

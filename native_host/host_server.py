@@ -29,7 +29,7 @@ If deps/models are missing, /enhance will return the original image (passthrough
 an X-MU-Host-Error header explaining what’s missing.
 """
 from __future__ import annotations
-import hashlib, io, json, os, sys, threading, time, traceback, urllib.parse, re, types
+import hashlib, io, json, os, sys, threading, time, traceback, urllib.parse, re, types, importlib.util, importlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import requests
@@ -41,7 +41,10 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 CFG_PATH = os.path.join(ROOT, "config.json")
 MODELS_DIR = os.path.join(ROOT, "models")
 CACHE_DIR = os.path.join(ROOT, "cache")
+CACHE_VERSION = 3
 os.makedirs(CACHE_DIR, exist_ok=True)
+WRAPPED_DIR = os.path.join(CACHE_DIR, "wrapped_models")
+os.makedirs(WRAPPED_DIR, exist_ok=True)
 
 DEFAULT_CFG = {
   "auto_scan_models": True,
@@ -80,7 +83,11 @@ DEFAULT_CFG = {
   },
   "default_scale": 2,
   "default_quality": "balanced",
-  "use_fp16": True
+  "use_fp16": True,
+  "grayscale_detection_threshold": 12,
+  "residual_add": False,
+  "residual_add_patterns": ["mangajanai", "illustrationjanai"],
+  "residual_add_strength": 0.5
 }
 
 QUALITY_PROFILES = {
@@ -151,6 +158,10 @@ def _normalize_cfg(cfg: dict) -> dict:
   cfg.setdefault("default_scale", 2)
   cfg.setdefault("default_quality", "balanced")
   cfg.setdefault("use_fp16", True)
+  cfg.setdefault("grayscale_detection_threshold", 12)
+  cfg.setdefault("residual_add", False)
+  cfg.setdefault("residual_add_patterns", ["mangajanai", "illustrationjanai"])
+  cfg.setdefault("residual_add_strength", 0.5)
 
   if cfg.get("auto_scan_models", True):
     scanned = _scan_models_dir()
@@ -188,6 +199,8 @@ CFG = load_cfg()
 _engine = None
 _engine_lock = threading.Lock()
 _engine_key = None
+_wrapped_cache: dict[str, str] = {}
+_model_blocks: dict[str, int] = {}
 
 def _pick_height(h: int, scale: int, model_type: str) -> int:
   mp = CFG.get("model_map_by_type", {}).get(model_type, {}).get(str(scale), {})
@@ -242,6 +255,22 @@ def _get_illustration_model_path(scale: int, quality: str) -> str | None:
         break
   if not name:
     return None
+  if _is_dat2_filename(name) and not _dat_arch_available():
+    # DAT2 not supported in current deps; fall back to ESRGAN variant.
+    alt_name = None
+    for q2 in ("balanced", "fast"):
+      for s in (str(scale), "4", "2"):
+        qmap = mp.get(s, {})
+        cand = qmap.get(q2)
+        if cand and not _is_dat2_filename(cand):
+          alt_name = cand
+          break
+      if alt_name:
+        break
+    if alt_name:
+      name = alt_name
+    else:
+      return None
   path = os.path.join(MODELS_DIR, name)
   if not os.path.exists(path):
     return None
@@ -254,14 +283,142 @@ def _normalize_quality(q: str | None) -> str:
 def _normalize_scale(scale: int) -> int:
   return 2 if scale <= 2 else 4
 
+def _is_dat2_filename(name: str) -> bool:
+  return "dat2" in name.lower()
+
+def _dat_arch_available() -> bool:
+  return importlib.util.find_spec("basicsr.archs.dat_arch") is not None
+
+def _convert_esrgan_state_dict(state: dict) -> dict:
+  if not any(k.startswith("model.") for k in state.keys()):
+    return state
+  out: dict[str, object] = {}
+  for k, v in state.items():
+    if k.startswith("model.0."):
+      nk = "conv_first." + k[len("model.0."):]
+    elif k.startswith("model.1.sub."):
+      suffix = k[len("model.1.sub."):]
+      # model.1.sub.23.* is the conv_body in ESRGAN/RRDBNet.
+      if ".RDB" not in suffix and (suffix.endswith(".weight") or suffix.endswith(".bias")):
+        nk = "conv_body." + suffix.split(".", 1)[-1]
+      else:
+        nk = "body." + suffix
+        nk = nk.replace(".RDB", ".rdb")
+        nk = re.sub(r"\.conv(\d+)\.0\.", r".conv\1.", nk)
+    elif k.startswith("model.3."):
+      nk = "conv_up1." + k[len("model.3."):]
+    elif k.startswith("model.6."):
+      nk = "conv_up2." + k[len("model.6."):]
+    elif k.startswith("model.8."):
+      nk = "conv_hr." + k[len("model.8."):]
+    elif k.startswith("model.10."):
+      nk = "conv_last." + k[len("model.10."):]
+    else:
+      continue
+    out[nk] = v
+  return out
+
+def _detect_num_blocks(state: dict) -> int | None:
+  max_idx = -1
+  for k in state.keys():
+    if ".RDB" not in k and ".rdb" not in k:
+      continue
+    m = re.match(r"^(?:model\\.1\\.sub|body)\\.(\\d+)\\.", k)
+    if not m:
+      continue
+    idx = int(m.group(1))
+    if idx > max_idx:
+      max_idx = idx
+  return max_idx + 1 if max_idx >= 0 else None
+
+def _ensure_conv_hr(state: dict) -> dict:
+  if "conv_hr.weight" in state and "conv_hr.bias" in state:
+    return state
+  import torch
+  for src in ("conv_up2", "conv_up1", "conv_body"):
+    w_key = f"{src}.weight"
+    b_key = f"{src}.bias"
+    if w_key in state:
+      state["conv_hr.weight"] = state[w_key].clone()
+      if b_key in state:
+        state["conv_hr.bias"] = state[b_key].clone()
+      else:
+        out_ch = state["conv_hr.weight"].shape[0]
+        state["conv_hr.bias"] = torch.zeros(out_ch)
+      break
+  return state
+
+def _wrap_model_if_needed(model_path: str) -> str:
+  cached_path = _wrapped_cache.get(model_path)
+  if cached_path:
+    if os.path.exists(cached_path):
+      if cached_path not in _model_blocks:
+        import torch
+        state = torch.load(cached_path, map_location="cpu", weights_only=True)
+        if isinstance(state, dict) and ("params" in state or "params_ema" in state):
+          sd = state.get("params_ema") or state.get("params") or {}
+        elif isinstance(state, dict) and "state_dict" in state:
+          sd = state["state_dict"]
+        else:
+          sd = state
+        num_blocks = _detect_num_blocks(sd) if isinstance(sd, dict) else None
+        if num_blocks:
+          _model_blocks[cached_path] = num_blocks
+      return cached_path
+    _wrapped_cache.pop(model_path, None)
+  import torch
+  state = torch.load(model_path, map_location="cpu", weights_only=True)
+  if isinstance(state, dict) and ("params" in state or "params_ema" in state):
+    sd = state.get("params_ema") or state.get("params") or {}
+    needs_wrap = False
+    if any(k.startswith("model.") for k in sd.keys()):
+      sd = _convert_esrgan_state_dict(sd)
+      needs_wrap = True
+    if "conv_hr.weight" not in sd:
+      sd = _ensure_conv_hr(sd)
+      needs_wrap = True
+    num_blocks = _detect_num_blocks(sd) if isinstance(sd, dict) else None
+    if num_blocks:
+      _model_blocks[model_path] = num_blocks
+    if not needs_wrap:
+      _wrapped_cache[model_path] = model_path
+      return model_path
+    state = sd
+  else:
+    if isinstance(state, dict) and "state_dict" in state:
+      state = state["state_dict"]
+    if not isinstance(state, dict):
+      raise RuntimeError("Unsupported model file format")
+    if any(k.startswith("model.") for k in state.keys()):
+      state = _convert_esrgan_state_dict(state)
+    if "conv_hr.weight" not in state:
+      state = _ensure_conv_hr(state)
+    num_blocks = _detect_num_blocks(state) if isinstance(state, dict) else None
+    if num_blocks:
+      _model_blocks[model_path] = num_blocks
+  stat = os.stat(model_path)
+  sig = f"{model_path}:{stat.st_size}:{int(stat.st_mtime)}:v4"
+  h = hashlib.sha1(sig.encode("utf-8")).hexdigest()
+  wrapped_path = os.path.join(WRAPPED_DIR, f"{h}.pth")
+  if not os.path.exists(wrapped_path):
+    torch.save({"params": state}, wrapped_path)
+  _wrapped_cache[model_path] = wrapped_path
+  if model_path in _model_blocks:
+    _model_blocks[wrapped_path] = _model_blocks[model_path]
+  return wrapped_path
+
 def _ensure_torchvision_compat():
-  try:
-    import torchvision.transforms.functional_tensor  # noqa: F401
+  if "torchvision.transforms.functional_tensor" in sys.modules:
     return
+  try:
+    if importlib.util.find_spec("torchvision.transforms.functional_tensor"):
+      importlib.import_module("torchvision.transforms.functional_tensor")
+      return
   except Exception:
+    # Some environments raise when __spec__ is None; fall through to shim.
     pass
   try:
-    import torchvision.transforms.functional as F
+    F = importlib.import_module("torchvision.transforms.functional")
   except Exception:
     return
 
@@ -272,6 +429,9 @@ def _ensure_torchvision_compat():
   def _getattr(name):
     return getattr(F, name)
   mod.__getattr__ = _getattr  # type: ignore[attr-defined]
+  mod.__spec__ = importlib.machinery.ModuleSpec(
+    "torchvision.transforms.functional_tensor", loader=None
+  )
   sys.modules["torchvision.transforms.functional_tensor"] = mod
 
 def _load_engine(model_path: str, scale: int, quality: str):
@@ -284,7 +444,9 @@ def _load_engine(model_path: str, scale: int, quality: str):
   # MangaJaNai V1 models are ESRGAN/RRDB-style.
   # Use RRDBNet like the Real-ESRGAN demo does for custom ESRGAN models.
   # (You can adjust in config.json if you use a different arch.)
-  model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=scale)
+  model_path = _wrap_model_if_needed(model_path)
+  num_block = _model_blocks.get(model_path, 23)
+  model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=num_block, num_grow_ch=32, scale=scale)
 
   prof = QUALITY_PROFILES.get(_normalize_quality(quality), QUALITY_PROFILES["balanced"])
   half = bool(CFG.get("use_fp16", True)) if prof["half"] else False
@@ -301,26 +463,51 @@ def _load_engine(model_path: str, scale: int, quality: str):
   return engine
 
 def _detect_grayscale(img: Image.Image) -> bool:
-  # Resize for speed and compute average channel spread.
+  # Resize for speed and compute color channel divergence while ignoring pure black/white.
+  import numpy as np
   thumb = img.copy()
   thumb.thumbnail((96, 96))
-  pix = thumb.convert("RGB").getdata()
-  total = 0
-  colorful = 0
-  count = 0
-  for r, g, b in pix:
-    mx = max(r, g, b)
-    mn = min(r, g, b)
-    diff = mx - mn
-    total += diff
-    count += 1
-    if diff > 18:
-      colorful += 1
-  if count == 0:
+  arr = np.asarray(thumb.convert("RGB"), dtype=np.uint8)
+  if arr.ndim != 3 or arr.shape[2] < 3:
     return True
-  avg = total / count
-  ratio = colorful / count
-  return avg < 7 or ratio < 0.03
+  r = arr[:, :, 0].astype(np.int16)
+  g = arr[:, :, 1].astype(np.int16)
+  b = arr[:, :, 2].astype(np.int16)
+
+  threshold = int(CFG.get("grayscale_detection_threshold", 12))
+  diff_rg = np.maximum(np.abs(r - g) - threshold, 0)
+  diff_rb = np.maximum(np.abs(r - b) - threshold, 0)
+  diff_gb = np.maximum(np.abs(g - b) - threshold, 0)
+
+  pure_black = (r == 0) & (g == 0) & (b == 0)
+  pure_white = (r == 255) & (g == 255) & (b == 255)
+  exclude = pure_black | pure_white
+
+  diff_sum = (diff_rg + diff_rb + diff_gb)
+  diff_sum = diff_sum[~exclude].sum()
+  size_wo = (~exclude).sum() * 3
+  if size_wo == 0:
+    return False
+  ratio = diff_sum / size_wo
+  return ratio <= (threshold / 12.0)
+
+def _should_apply_residual(model_path: str) -> bool:
+  if not CFG.get("residual_add", True):
+    return False
+  strength = float(CFG.get("residual_add_strength", 1.0) or 0)
+  if strength <= 0:
+    return False
+  patterns = CFG.get("residual_add_patterns") or []
+  name = os.path.basename(model_path).lower()
+  return any(pat.lower() in name for pat in patterns)
+
+def _apply_residual_add(out_rgb, src_img: Image.Image, strength: float) -> "np.ndarray":
+  import numpy as np
+  base = src_img.resize((out_rgb.shape[1], out_rgb.shape[0]), resample=Image.BICUBIC)
+  base_np = np.asarray(base, dtype=np.float32)
+  out_np = out_rgb.astype(np.float32)
+  res = base_np + out_np * float(strength)
+  return np.clip(res, 0, 255).astype(np.uint8)
 
 def _choose_model_type(is_grayscale: bool) -> str:
   if is_grayscale:
@@ -361,14 +548,18 @@ def enhance_bytes(img_bytes: bytes, scale: int, quality: str | None) -> tuple[by
   in_img = np.array(img)[:, :, ::-1]  # RGB -> BGR
   out, _ = engine.enhance(in_img, outscale=scale)
   out_rgb = out[:, :, ::-1]
+  resid_tag = ""
+  if _should_apply_residual(model_path):
+    out_rgb = _apply_residual_add(out_rgb, img, CFG.get("residual_add_strength", 1.0))
+    resid_tag = " resid"
   out_img = Image.fromarray(out_rgb)
 
   buf = io.BytesIO()
   out_img.save(buf, format="PNG", optimize=True)
   if height_key:
-    label = f"{model_type}:{height_key}p x{scale} {q}"
+    label = f"{model_type}:{height_key}p x{scale} {q}{resid_tag}"
   else:
-    label = f"{model_type}:{q} x{scale}"
+    label = f"{model_type}:{q} x{scale}{resid_tag}"
   return buf.getvalue(), label
 
 class Handler(BaseHTTPRequestHandler):
@@ -400,7 +591,7 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(400, b"missing url")
 
       # Simple disk cache keyed by url+scale
-      cache_key = str(abs(hash(f"{url}::{scale}::{quality}")))
+      cache_key = str(abs(hash(f"v{CACHE_VERSION}::{url}::{scale}::{quality}")))
       cache_path = os.path.join(CACHE_DIR, f"{cache_key}.png")
       if os.path.exists(cache_path):
         with open(cache_path, "rb") as f:
@@ -446,7 +637,7 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(400, b"empty body")
 
       # Cache by content hash + scale + quality
-      h = hashlib.sha1(src_bytes + f"::{scale}::{quality}".encode("utf-8")).hexdigest()
+      h = hashlib.sha1(src_bytes + f"::{scale}::{quality}::v{CACHE_VERSION}".encode("utf-8")).hexdigest()
       cache_path = os.path.join(CACHE_DIR, f"{h}.png")
       if os.path.exists(cache_path):
         with open(cache_path, "rb") as f:
