@@ -4,6 +4,8 @@
 param(
   [switch]$AllowDat2,
   [switch]$SkipModelDownload,
+  [switch]$DepsOnly,
+  [switch]$TorchOnly,
   [switch]$ModelsOnly,
   [switch]$SkipNativeMessaging,
   [switch]$NoPause,
@@ -44,14 +46,53 @@ function Resolve-PathString {
   }
 }
 
-function Get-GpuComputeCapability {
-  $nvidiaSmi = Resolve-Exec -Name "nvidia-smi"
-  if (-not $nvidiaSmi) {
-    $fallback = Join-Path ${env:ProgramFiles} "NVIDIA Corporation\NVSMI\nvidia-smi.exe"
-    if (Test-Path $fallback) { $nvidiaSmi = $fallback }
+function Find-NvidiaSmi {
+  $fromPath = Resolve-Exec -Name "nvidia-smi"
+  if ($fromPath) { return $fromPath }
+
+  $candidates = @(
+    "C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe",
+    "C:\Program Files (x86)\NVIDIA Corporation\NVSMI\nvidia-smi.exe"
+  )
+  if ($env:ProgramW6432) {
+    $candidates += (Join-Path $env:ProgramW6432 "NVIDIA Corporation\NVSMI\nvidia-smi.exe")
   }
+  if ($env:ProgramFiles) {
+    $candidates += (Join-Path $env:ProgramFiles "NVIDIA Corporation\NVSMI\nvidia-smi.exe")
+  }
+  if ($env:"ProgramFiles(x86)") {
+    $candidates += (Join-Path $env:"ProgramFiles(x86)" "NVIDIA Corporation\NVSMI\nvidia-smi.exe")
+  }
+  $candidates += (Join-Path $env:WINDIR "System32\nvidia-smi.exe")
+
+  foreach ($path in $candidates | Where-Object { $_ }) {
+    if (Test-Path $path) { return $path }
+  }
+  return $null
+}
+
+function Get-GpuComputeCapabilityFromWmi {
+  try {
+    $gpu = Get-CimInstance Win32_VideoController | Where-Object { $_.Name -match 'NVIDIA' } | Select-Object -First 1
+  } catch {
+    return $null
+  }
+  if (-not $gpu -or -not $gpu.Name) { return $null }
+  Write-Log ("Detected GPU via WMI: " + $gpu.Name)
+  if ($gpu.Name -match 'RTX 50\d{2}') {
+    Write-Log "GPU name suggests RTX 50xx; assuming compute capability 12.0"
+    return 12.0
+  }
+  return $null
+}
+
+function Get-GpuComputeCapability {
+  $nvidiaSmi = Find-NvidiaSmi
   if (-not $nvidiaSmi) {
-    Write-Log "nvidia-smi not found; using default CUDA index."
+    Write-Log "nvidia-smi not found; attempting WMI GPU detection."
+    $wmiCap = Get-GpuComputeCapabilityFromWmi
+    if ($null -ne $wmiCap) { return $wmiCap }
+    Write-Log "WMI fallback did not determine compute capability; using default CUDA index."
     return $null
   }
   Write-Log "Using nvidia-smi at $nvidiaSmi"
@@ -160,7 +201,11 @@ function Find-ExtensionId {
 }
 
 if ($LogPath) {
-  try { New-Item -ItemType File -Path $LogPath -Force | Out-Null } catch { }
+  try {
+    if (-not (Test-Path $LogPath)) {
+      New-Item -ItemType File -Path $LogPath -Force | Out-Null
+    }
+  } catch { }
 }
 
 function Write-LogLines {
@@ -235,22 +280,6 @@ function New-Venv {
 }
 
 $venvPython = Join-Path $PSScriptRoot ".venv\\Scripts\\python.exe"
-
-if ($ModelsOnly) {
-  if (-not (Test-Path $venvPython)) {
-    Write-Host "Venv not found. Run the full installer first."
-    Write-Log "ModelsOnly requested but venv missing."
-    exit 1
-  }
-  Write-Log "Using venv python: $venvPython"
-  Write-Host "Downloading MangaJaNai models... (this can take a while)"
-  Write-Log "Downloading MangaJaNai models."
-  $dlArgs = @("host_server.py", "--download-models")
-  if ($AllowDat2) { $dlArgs += "--allow-dat2" }
-  & $venvPython @dlArgs
-  if (-not $NoPause) { pause }
-  exit 0
-}
 $needsVenv = $true
 if (Test-Path $venvPython) {
   try {
@@ -290,38 +319,60 @@ if (-not (Test-Path $venvPython)) {
 }
 Write-Log "Using venv python: $venvPython"
 
-Write-Host "Installing Python dependencies... (this can take several minutes)"
-Write-Log "Installing Python dependencies."
-Invoke-Logged -Label "pip upgrade" -Command $venvPython -CmdArgs @("-m","pip","install","--disable-pip-version-check","--upgrade","pip")
-Write-Log "Installing requirements (excluding torch packages)."
-$reqPath = Join-Path $PSScriptRoot "requirements.txt"
-$tmpReq = Write-TempRequirements -SourcePath $reqPath
-Invoke-Logged -Label "pip requirements" -Command $venvPython -CmdArgs @("-m","pip","install","--disable-pip-version-check","-r",$tmpReq)
-if ($tmpReq -and (Test-Path $tmpReq)) {
-  try { Remove-Item $tmpReq -Force } catch { }
+$phaseOnly = $DepsOnly -or $TorchOnly -or $ModelsOnly
+$runDeps = $true
+$runTorch = $true
+$runModels = -not $SkipModelDownload
+if ($phaseOnly) {
+  $runDeps = $DepsOnly
+  $runTorch = $TorchOnly
+  $runModels = $ModelsOnly
+}
+
+if ($runDeps) {
+  Write-Log "Phase: dependencies"
+  Write-Host "Installing Python dependencies... (this can take several minutes)"
+  Write-Log "Installing Python dependencies."
+  Invoke-Logged -Label "pip upgrade" -Command $venvPython -CmdArgs @("-m","pip","install","--disable-pip-version-check","--upgrade","pip")
+  Write-Log "Installing requirements (excluding torch packages)."
+  $reqPath = Join-Path $PSScriptRoot "requirements.txt"
+  $tmpReq = Write-TempRequirements -SourcePath $reqPath
+  Invoke-Logged -Label "pip requirements" -Command $venvPython -CmdArgs @("-m","pip","install","--disable-pip-version-check","-r",$tmpReq)
+  if ($tmpReq -and (Test-Path $tmpReq)) {
+    try { Remove-Item $tmpReq -Force } catch { }
+  }
 }
 
 # CUDA Torch build (adjust CudaIndexUrl if needed)
-Write-Host "Installing PyTorch (CUDA)... (this can take several minutes)"
-$torchIndexUrl = $CudaIndexUrl
-$torchPre = $false
-if (-not $PSBoundParameters.ContainsKey("CudaIndexUrl")) {
-  $cap = Get-GpuComputeCapability
-  if ($cap -ge 12.0) {
-    $torchIndexUrl = "https://download.pytorch.org/whl/cu128"
-    $torchPre = $false
-    $msg = "Detected GPU compute capability $cap; using CUDA 12.8 build."
-    Write-Host $msg
-    Write-Log $msg
+if ($runTorch) {
+  Write-Log "Phase: torch"
+  Write-Host "Installing PyTorch (CUDA)... (this can take several minutes)"
+  $torchIndexUrl = $CudaIndexUrl
+  $torchPre = $false
+  $cap = $null
+  if (-not $PSBoundParameters.ContainsKey("CudaIndexUrl")) {
+    Write-Log "GPU preflight check"
+    $cap = Get-GpuComputeCapability
+    if ($null -ne $cap) {
+      Write-Host ("Detected GPU compute capability: " + $cap)
+    } else {
+      Write-Host "Could not detect GPU compute capability; using default CUDA index."
+    }
+    if ($null -ne $cap -and $cap -ge 12.0) {
+      $torchIndexUrl = "https://download.pytorch.org/whl/cu128"
+      $torchPre = $false
+      $msg = "Detected GPU compute capability $cap; using CUDA 12.8 build."
+      Write-Host $msg
+      Write-Log $msg
+    }
   }
-}
-Write-Log "Installing Torch from $torchIndexUrl"
-$torchArgs = @("-m","pip","install","--disable-pip-version-check","--force-reinstall","--index-url",$torchIndexUrl,"torch","torchvision","torchaudio")
-if ($torchPre) { $torchArgs = @("-m","pip","install","--disable-pip-version-check","--force-reinstall","--pre","--index-url",$torchIndexUrl,"torch","torchvision","torchaudio") }
-Invoke-Logged -Label "pip torch cuda" -Command $venvPython -CmdArgs $torchArgs
-Invoke-Logged -Label "pip numpy" -Command $venvPython -CmdArgs @("-m","pip","install","--disable-pip-version-check","numpy==2.2.6")
+  Write-Log "Installing Torch from $torchIndexUrl"
+  $torchArgs = @("-m","pip","install","--disable-pip-version-check","--force-reinstall","--index-url",$torchIndexUrl,"torch","torchvision","torchaudio")
+  if ($torchPre) { $torchArgs = @("-m","pip","install","--disable-pip-version-check","--force-reinstall","--pre","--index-url",$torchIndexUrl,"torch","torchvision","torchaudio") }
+  Invoke-Logged -Label "pip torch cuda" -Command $venvPython -CmdArgs $torchArgs
+  Invoke-Logged -Label "pip numpy" -Command $venvPython -CmdArgs @("-m","pip","install","--disable-pip-version-check","numpy==2.2.6")
 
-$cudaCheckScript = @'
+  $cudaCheckScript = @'
 import json
 import torch
 
@@ -340,34 +391,42 @@ if torch.cuda.is_available():
         info["arch_list_error"] = str(exc)
 print(json.dumps(info))
 '@
-$cudaCheckPath = Write-TempPythonScript -Name "mu_cuda_check.py" -Content $cudaCheckScript
-Write-Log "CUDA check"
-Write-Log ("Command: " + $venvPython + " " + $cudaCheckPath)
-$cudaOut = & $venvPython $cudaCheckPath 2>&1
-Write-LogLines -Lines $cudaOut
-try {
-  $jsonLine = $cudaOut | Where-Object { $_ -match '^\s*\{' } | Select-Object -Last 1
-  if ($jsonLine) {
-    $info = $jsonLine | ConvertFrom-Json
-    if ($info.cuda_available -and $info.device_capability -and $info.arch_list) {
-      $capStr = ($info.device_capability -replace '\.','')
-      $sm = "sm_$capStr"
-      if ($info.arch_list -notcontains $sm) {
-        $warn = "CUDA build does not include $sm; GPU acceleration may fail. Re-run installer with -CudaIndexUrl to a compatible build."
+  $cudaCheckPath = Write-TempPythonScript -Name "mu_cuda_check.py" -Content $cudaCheckScript
+  Write-Log "CUDA check"
+  Write-Log ("Command: " + $venvPython + " " + $cudaCheckPath)
+  $cudaOut = & $venvPython $cudaCheckPath 2>&1
+  Write-LogLines -Lines $cudaOut
+  try {
+    $jsonLine = $cudaOut | Where-Object { $_ -match '^\s*\{' } | Select-Object -Last 1
+    if ($jsonLine) {
+      $info = $jsonLine | ConvertFrom-Json
+      if ($info.cuda_available -and $info.device_capability -and $info.arch_list) {
+        $capStr = ($info.device_capability -replace '\.','')
+        $sm = "sm_$capStr"
+        if ($info.arch_list -notcontains $sm) {
+          $warn = "CUDA build does not include $sm; GPU acceleration may fail. Re-run installer with -CudaIndexUrl to a compatible build."
+          Write-Host $warn
+          Write-Log $warn
+        }
+      } elseif (-not $info.cuda_available) {
+        $warn = "CUDA not available after install; using CPU (slow)."
         Write-Host $warn
         Write-Log $warn
       }
-    } elseif (-not $info.cuda_available) {
-      $warn = "CUDA not available after install; using CPU (slow)."
-      Write-Host $warn
-      Write-Log $warn
     }
+  } catch {
+    Write-Log ("CUDA check parse failed: " + $_.Exception.Message)
   }
-} catch {
-  Write-Log ("CUDA check parse failed: " + $_.Exception.Message)
+  try { Remove-Item $cudaCheckPath -Force } catch { }
 }
-try { Remove-Item $cudaCheckPath -Force } catch { }
 
+if ($phaseOnly) {
+  Write-Log "Phase complete."
+  if (-not $NoPause) {
+    pause
+  }
+  exit 0
+}
 
 if (-not $SkipNativeMessaging) {
   # Register native messaging host for Chrome
@@ -407,12 +466,12 @@ if (-not $SkipNativeMessaging) {
 }
 
 # Optional model download (official MangaJaNai release)
-if (-not $SkipModelDownload) {
+if ($runModels) {
   Write-Host "Downloading MangaJaNai models... (this can take a while)"
   Write-Log "Downloading MangaJaNai models."
   $dlArgs = @("host_server.py", "--download-models")
   if ($AllowDat2) { $dlArgs += "--allow-dat2" }
-  & $venvPython @dlArgs
+  Invoke-Logged -Label "model download" -Command $venvPython -CmdArgs $dlArgs
 }
 
 Write-Host ""

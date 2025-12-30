@@ -32,7 +32,8 @@ Name: "{app}\\cache"
 Root: HKCU; Subkey: "Software\\Google\\Chrome\\NativeMessagingHosts\\com.softlynn.manga_upscaler"; ValueType: string; ValueName: ""; ValueData: "{app}\\native_messaging_manifest.json"; Flags: uninsdeletekey
 
 [Run]
-Filename: "powershell.exe"; Parameters: "-NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\\install_windows.ps1"" -SkipNativeMessaging -SkipModelDownload -NoPause -LogPath ""{app}\\install.log"""; StatusMsg: "Installing Python dependencies..."; Flags: waituntilterminated runhidden skipifsilent
+Filename: "powershell.exe"; Parameters: "-NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\\install_windows.ps1"" -SkipNativeMessaging -DepsOnly -NoPause -LogPath ""{app}\\install.log"""; StatusMsg: "Installing Python dependencies..."; Flags: waituntilterminated runhidden skipifsilent
+Filename: "powershell.exe"; Parameters: "-NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\\install_windows.ps1"" -SkipNativeMessaging -TorchOnly -NoPause -LogPath ""{app}\\install.log"""; StatusMsg: "Installing PyTorch (CUDA)..."; Flags: waituntilterminated runhidden skipifsilent
 Filename: "powershell.exe"; Parameters: "-NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\\install_windows.ps1"" -SkipNativeMessaging -ModelsOnly -NoPause -LogPath ""{app}\\install.log"""; StatusMsg: "Downloading MangaJaNai models..."; Flags: waituntilterminated runhidden skipifsilent
 Filename: "{app}\\{#MyTrayExe}"; Description: "Start Manga Upscaler Host tray"; Flags: nowait postinstall skipifsilent
 
