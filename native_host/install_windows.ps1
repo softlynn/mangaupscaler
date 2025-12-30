@@ -398,7 +398,9 @@ if ($runTorch) {
     if ($null -ne $cap) {
       Write-Host ("Detected GPU compute capability: " + $cap)
     } else {
-      Write-Host "Could not detect GPU compute capability; using default CUDA index."
+      Write-Host "Could not detect GPU compute capability; defaulting to CUDA 12.8."
+      Write-Log "Compute capability unknown; defaulting CUDA index to cu128."
+      $torchIndexUrl = "https://download.pytorch.org/whl/cu128"
     }
     if ($null -ne $cap -and $cap -ge 12.0) {
       $torchIndexUrl = "https://download.pytorch.org/whl/cu128"

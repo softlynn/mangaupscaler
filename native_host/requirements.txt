@@ -4,6 +4,3 @@ requests
 realesrgan
 basicsr
 pystray
-torch
-torchvision
-torchaudio
