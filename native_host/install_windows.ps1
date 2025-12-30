@@ -134,12 +134,12 @@ if (-not $pyLauncher -and -not $pythonExe) {
 function New-Venv {
   param(
     [string]$Command,
-    [string[]]$Args
+    [string[]]$VenvArgs
   )
   try {
-    $label = "Creating venv via $Command $($Args -join ' ')"
+    $label = "Creating venv via $Command $($VenvArgs -join ' ')"
     Write-Log $label
-    $output = & $Command @Args -m venv .venv 2>&1
+    $output = & $Command @VenvArgs -m venv .venv 2>&1
     Write-LogLines -Lines $output
     if ($LASTEXITCODE -eq 0 -and (Test-Path ".venv\\Scripts\\python.exe")) {
       return $true
@@ -169,13 +169,13 @@ if (Test-Path $venvPython) {
 if ($needsVenv) {
   $created = $false
   if ($pyLauncher) {
-    $created = New-Venv -Command "py" -Args @("-3.10")
+    $created = New-Venv -Command "py" -VenvArgs @("-3.10")
     if (-not $created) {
-      $created = New-Venv -Command "py" -Args @("-3.11")
+      $created = New-Venv -Command "py" -VenvArgs @("-3.11")
     }
   }
   if (-not $created -and $pythonExe) {
-    $created = New-Venv -Command "python" -Args @()
+    $created = New-Venv -Command "python" -VenvArgs @()
   }
   if (-not $created) {
     Write-Host "Failed to create .venv. See install.log for details."
