@@ -1,0 +1,7 @@
+{
+  "name": "com.softlynn.manga_upscaler",
+  "description": "Softlynn Manga Upscaler native host (optional AI mode)",
+  "path": "C:\\MangaUpscalerHost\\host.bat",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://kciacmbepigmndncggbcnlalmeokoknp/"]
+}

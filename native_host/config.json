@@ -1,0 +1,39 @@
+{
+  "auto_scan_models": true,
+  "model_map_by_type": {
+    "manga": {
+      "2": {
+        "1200": "2x_MangaJaNai_1200p_V1_ESRGAN_70k.pth",
+        "1300": "2x_MangaJaNai_1300p_V1_ESRGAN_75k.pth",
+        "1400": "2x_MangaJaNai_1400p_V1_ESRGAN_70k.pth",
+        "1500": "2x_MangaJaNai_1500p_V1_ESRGAN_90k.pth",
+        "1600": "2x_MangaJaNai_1600p_V1_ESRGAN_90k.pth",
+        "1920": "2x_MangaJaNai_1920p_V1_ESRGAN_70k.pth",
+        "2048": "2x_MangaJaNai_2048p_V1_ESRGAN_95k.pth"
+      },
+      "4": {
+        "1200": "4x_MangaJaNai_1200p_V1_ESRGAN_70k.pth",
+        "1300": "4x_MangaJaNai_1300p_V1_ESRGAN_75k.pth",
+        "1400": "4x_MangaJaNai_1400p_V1_ESRGAN_105k.pth",
+        "1500": "4x_MangaJaNai_1500p_V1_ESRGAN_105k.pth",
+        "1600": "4x_MangaJaNai_1600p_V1_ESRGAN_70k.pth",
+        "1920": "4x_MangaJaNai_1920p_V1_ESRGAN_105k.pth",
+        "2048": "4x_MangaJaNai_2048p_V1_ESRGAN_70k.pth"
+      }
+    },
+    "illustration": {
+      "2": {},
+      "4": {}
+    }
+  },
+  "illustration_by_quality": {
+    "4": {
+      "fast": "4x_IllustrationJaNai_V1_ESRGAN_135k.pth",
+      "balanced": "4x_IllustrationJaNai_V1_ESRGAN_135k.pth",
+      "best": "4x_IllustrationJaNai_V1_DAT2_190k.pth"
+    }
+  },
+  "default_scale": 2,
+  "default_quality": "balanced",
+  "use_fp16": true
+}

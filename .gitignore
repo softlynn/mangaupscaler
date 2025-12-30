@@ -1,0 +1,9 @@
+.vs/
+.git_backup/
+
+native_host/.venv/
+native_host/cache/
+native_host/models/
+
+__pycache__/
+*.pyc
