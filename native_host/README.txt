@@ -1,19 +1,27 @@
-Manga Upscaler — Optional AI / RTX Local Enhancer (Advanced)
+Manga Upscaler - Optional AI / RTX Local Enhancer (Advanced)
 
 Why this exists:
 - Browser-only enhancement is fast and works everywhere, but it can't match true AI upscalers.
 - This optional local host lets the extension send the current panel to a local program that can run
   Real-ESRGAN / waifu2x / RTX Video Super Resolution-like pipelines on your GPU.
 
-What’s included here:
-- native_messaging_manifest.template.json  (you MUST edit extension ID + path)
-- install_windows.ps1  (writes the manifest + registry entry)
-- host_server.py       (simple native host that accepts base64 PNG and returns enhanced PNG)
+What's included here:
+- native_messaging_manifest.template.json  (template for native messaging registration)
+- install_windows.ps1  (installs deps + registers native messaging + optional model download)
+- host_launcher.bat    (native messaging entrypoint)
+- native_messaging_host.py  (starts the tray host on demand)
+- tray_app.py          (system tray host with start/stop + cache tools)
+- host_server.py       (local HTTP host that returns enhanced PNGs)
+- build_exe.ps1        (builds tray/native host exes with PyInstaller)
+- installer/           (Inno Setup script for a packaged installer)
 
 What is NOT included:
-- AI models / binaries. You'll need to install an upscaler yourself (examples in host_server.py comments).
+- AI models. Install via install_windows.ps1 or the Settings "Download models" button.
 
-If you want me to wire this up fully for YOUR machine, tell me:
-- Windows username
-- Where you want it installed (e.g., C:\MangaUpscalerHost\)
-- Which upscaler you prefer: Real-ESRGAN (recommended) or waifu2x
+Notes:
+- install_windows.ps1 attempts to auto-detect the unpacked extension ID from Chrome profiles.
+
+Build the installer:
+1) Run: .\build_exe.ps1
+2) Open installer\MangaUpscalerHost.iss in Inno Setup and Compile.
+3) If your extension ID differs, update it in the .iss before building.

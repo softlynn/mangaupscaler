@@ -8,6 +8,11 @@ can use to swap manga panel images to AI-enhanced versions without lagging the w
 Endpoints:
   GET /health
   GET /enhance?url=<img_url>&scale=2|3|4
+  POST /enhance
+  POST /config
+  POST /cache/clear
+  POST /models/download
+  POST /shutdown
 
 Setup (Windows, simplest):
   1) Install Python 3.10+
@@ -24,24 +29,37 @@ Setup (Windows, simplest):
   5) Edit config.json if you want different model mapping.
   6) Run:
         python host_server.py
+     Or download models only:
+        python host_server.py --download-models [--allow-dat2]
 
 If deps/models are missing, /enhance will return the original image (passthrough) plus
-an X-MU-Host-Error header explaining what’s missing.
+an X-MU-Host-Error header explaining what's missing.
 """
 from __future__ import annotations
 import hashlib, io, json, os, sys, threading, time, traceback, urllib.parse, re, types, importlib.util, importlib
+from typing import TYPE_CHECKING
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import requests
 from PIL import Image
 
+if TYPE_CHECKING:
+  import numpy as np
+
 PORT = 48159
 HOST = "127.0.0.1"
-ROOT = os.path.dirname(os.path.abspath(__file__))
+
+def _get_root_dir() -> str:
+  if getattr(sys, "frozen", False):
+    return os.path.dirname(sys.executable)
+  return os.path.dirname(os.path.abspath(__file__))
+
+ROOT = _get_root_dir()
 CFG_PATH = os.path.join(ROOT, "config.json")
 MODELS_DIR = os.path.join(ROOT, "models")
 CACHE_DIR = os.path.join(ROOT, "cache")
 CACHE_VERSION = 3
+CACHE_CLEANUP_INTERVAL_SEC = 120
 os.makedirs(CACHE_DIR, exist_ok=True)
 WRAPPED_DIR = os.path.join(CACHE_DIR, "wrapped_models")
 os.makedirs(WRAPPED_DIR, exist_ok=True)
@@ -87,7 +105,11 @@ DEFAULT_CFG = {
   "grayscale_detection_threshold": 12,
   "residual_add": False,
   "residual_add_patterns": ["mangajanai", "illustrationjanai"],
-  "residual_add_strength": 0.5
+  "residual_add_strength": 0.5,
+  "cache_max_gb": 1.0,
+  "cache_max_age_days": 0,
+  "allow_dat2": False,
+  "idle_shutdown_minutes": 5
 }
 
 QUALITY_PROFILES = {
@@ -107,15 +129,17 @@ def _scan_models_dir() -> dict[str, dict[str, dict[str, str]]]:
   if not os.path.isdir(MODELS_DIR):
     return out
   pat = re.compile(r"^(?P<scale>[24])x_(?P<kind>MangaJaNai|IllustrationJaNai)_(?P<h>\d+)p_.*\.pth$", re.IGNORECASE)
-  for fn in os.listdir(MODELS_DIR):
-    m = pat.match(fn)
-    if not m:
-      continue
-    scale = m.group("scale")
-    h = m.group("h")
-    kind = m.group("kind").lower()
-    model_type = "illustration" if "illustration" in kind else "manga"
-    out.setdefault(model_type, {}).setdefault(scale, {})[h] = fn
+  for root, _, files in os.walk(MODELS_DIR):
+    for fn in files:
+      m = pat.match(fn)
+      if not m:
+        continue
+      scale = m.group("scale")
+      h = m.group("h")
+      kind = m.group("kind").lower()
+      model_type = "illustration" if "illustration" in kind else "manga"
+      rel = os.path.relpath(os.path.join(root, fn), MODELS_DIR)
+      out.setdefault(model_type, {}).setdefault(scale, {})[h] = rel
   return out
 
 
@@ -129,14 +153,16 @@ def _scan_illustration_quality_models() -> dict[str, dict[str, str]]:
   if not os.path.isdir(MODELS_DIR):
     return out
   pat = re.compile(r"^(?P<scale>[24])x_IllustrationJaNai_V1_(?P<variant>ESRGAN|DAT2)_\d+k\.pth$", re.IGNORECASE)
-  for fn in os.listdir(MODELS_DIR):
-    m = pat.match(fn)
-    if not m:
-      continue
-    scale = m.group("scale")
-    variant = m.group("variant").lower()
-    q = "best" if "dat2" in variant else "balanced"
-    out.setdefault(scale, {})[q] = fn
+  for root, _, files in os.walk(MODELS_DIR):
+    for fn in files:
+      m = pat.match(fn)
+      if not m:
+        continue
+      scale = m.group("scale")
+      variant = m.group("variant").lower()
+      q = "best" if "dat2" in variant else "balanced"
+      rel = os.path.relpath(os.path.join(root, fn), MODELS_DIR)
+      out.setdefault(scale, {})[q] = rel
   for scale, mp in out.items():
     if "balanced" in mp and "fast" not in mp:
       mp["fast"] = mp["balanced"]
@@ -162,6 +188,10 @@ def _normalize_cfg(cfg: dict) -> dict:
   cfg.setdefault("residual_add", False)
   cfg.setdefault("residual_add_patterns", ["mangajanai", "illustrationjanai"])
   cfg.setdefault("residual_add_strength", 0.5)
+  cfg.setdefault("cache_max_gb", 1.0)
+  cfg.setdefault("cache_max_age_days", 0)
+  cfg.setdefault("allow_dat2", False)
+  cfg.setdefault("idle_shutdown_minutes", 5)
 
   if cfg.get("auto_scan_models", True):
     scanned = _scan_models_dir()
@@ -193,6 +223,10 @@ def load_cfg():
     cfg = json.load(f)
   return _normalize_cfg(cfg)
 
+def save_cfg(cfg: dict) -> None:
+  with open(CFG_PATH, "w", encoding="utf-8") as f:
+    json.dump(cfg, f, indent=2)
+
 CFG = load_cfg()
 
 # Lazy-loaded model (kept in memory)
@@ -201,6 +235,9 @@ _engine_lock = threading.Lock()
 _engine_key = None
 _wrapped_cache: dict[str, str] = {}
 _model_blocks: dict[str, int] = {}
+_last_cache_cleanup = 0.0
+_last_enhance_ts = 0.0
+_idle_stop = threading.Event()
 
 def _pick_height(h: int, scale: int, model_type: str) -> int:
   mp = CFG.get("model_map_by_type", {}).get(model_type, {}).get(str(scale), {})
@@ -255,7 +292,7 @@ def _get_illustration_model_path(scale: int, quality: str) -> str | None:
         break
   if not name:
     return None
-  if _is_dat2_filename(name) and not _dat_arch_available():
+  if _is_dat2_filename(name) and (not CFG.get("allow_dat2", False) or not _dat_arch_available()):
     # DAT2 not supported in current deps; fall back to ESRGAN variant.
     alt_name = None
     for q2 in ("balanced", "fast"):
@@ -501,13 +538,149 @@ def _should_apply_residual(model_path: str) -> bool:
   name = os.path.basename(model_path).lower()
   return any(pat.lower() in name for pat in patterns)
 
-def _apply_residual_add(out_rgb, src_img: Image.Image, strength: float) -> "np.ndarray":
+def _apply_residual_add(out_rgb, src_img: Image.Image, strength: float) -> np.ndarray:
   import numpy as np
   base = src_img.resize((out_rgb.shape[1], out_rgb.shape[0]), resample=Image.BICUBIC)
   base_np = np.asarray(base, dtype=np.float32)
   out_np = out_rgb.astype(np.float32)
   res = base_np + out_np * float(strength)
   return np.clip(res, 0, 255).astype(np.uint8)
+
+def _iter_cache_files(include_wrapped: bool = False):
+  wrapped = os.path.abspath(WRAPPED_DIR)
+  root_abs = os.path.abspath(CACHE_DIR)
+  for root, dirs, files in os.walk(root_abs):
+    if not include_wrapped:
+      dirs[:] = [d for d in dirs if os.path.abspath(os.path.join(root, d)) != wrapped and d != "wrapped_models"]
+    for fn in files:
+      path = os.path.join(root, fn)
+      if not include_wrapped and os.path.abspath(path).startswith(wrapped):
+        continue
+      try:
+        st = os.stat(path)
+      except OSError:
+        continue
+      yield path, st.st_size, st.st_mtime
+
+def _cleanup_cache_if_needed(force: bool = False) -> None:
+  global _last_cache_cleanup
+  now = time.time()
+  if not force and (now - _last_cache_cleanup) < CACHE_CLEANUP_INTERVAL_SEC:
+    return
+  _last_cache_cleanup = now
+
+  max_gb = float(CFG.get("cache_max_gb", 1.0) or 0)
+  max_bytes = int(max_gb * (1024 ** 3)) if max_gb > 0 else 0
+  max_age_days = int(CFG.get("cache_max_age_days", 0) or 0)
+  cutoff = now - (max_age_days * 86400) if max_age_days > 0 else 0
+
+  files = list(_iter_cache_files(include_wrapped=False))
+
+  # Age-based cleanup
+  if cutoff > 0:
+    for path, _, mtime in files:
+      if mtime < cutoff:
+        try:
+          os.remove(path)
+        except OSError:
+          pass
+    files = list(_iter_cache_files(include_wrapped=False))
+
+  # Size-based cleanup
+  if max_bytes > 0:
+    total = sum(size for _, size, _ in files)
+    if total > max_bytes:
+      files.sort(key=lambda x: x[2])  # oldest first
+      for path, size, _ in files:
+        try:
+          os.remove(path)
+        except OSError:
+          pass
+        total -= size
+        if total <= max_bytes:
+          break
+
+def _clear_cache(include_wrapped: bool = False) -> int:
+  removed = 0
+  for path, _, _ in _iter_cache_files(include_wrapped=include_wrapped):
+    try:
+      os.remove(path)
+      removed += 1
+    except OSError:
+      pass
+  return removed
+
+def _touch_enhance():
+  global _last_enhance_ts
+  _last_enhance_ts = time.time()
+
+def _get_idle_minutes() -> float:
+  try:
+    return float(CFG.get("idle_shutdown_minutes", 5) or 0)
+  except Exception:
+    return 0.0
+
+def _idle_monitor(httpd):
+  while not _idle_stop.is_set():
+    minutes = _get_idle_minutes()
+    if minutes <= 0:
+      _idle_stop.wait(5)
+      continue
+    idle_for = time.time() - _last_enhance_ts
+    if idle_for >= (minutes * 60):
+      try:
+        httpd.shutdown()
+      except Exception:
+        pass
+      return
+    _idle_stop.wait(5)
+
+def _download_models(allow_dat2: bool) -> dict:
+  os.makedirs(MODELS_DIR, exist_ok=True)
+  api_url = "https://api.github.com/repos/the-database/MangaJaNai/releases/tags/1.0.0"
+  r = requests.get(api_url, timeout=30)
+  r.raise_for_status()
+  data = r.json()
+  assets = {a.get("name"): a.get("browser_download_url") for a in data.get("assets", [])}
+  wanted = [
+    "MangaJaNai_V1_ModelsOnly.zip",
+    "IllustrationJaNai_V1_ModelsOnly.zip"
+  ]
+
+  imported = []
+  for name in wanted:
+    url = assets.get(name)
+    if not url:
+      continue
+    tmp_zip = os.path.join(CACHE_DIR, f"dl_{name}")
+    with requests.get(url, stream=True, timeout=120) as resp:
+      resp.raise_for_status()
+      with open(tmp_zip, "wb") as f:
+        for chunk in resp.iter_content(chunk_size=1024 * 1024):
+          if chunk:
+            f.write(chunk)
+    import zipfile
+    with zipfile.ZipFile(tmp_zip, "r") as zf:
+      zf.extractall(MODELS_DIR)
+    try:
+      os.remove(tmp_zip)
+    except OSError:
+      pass
+    imported.append(name)
+
+  if not allow_dat2:
+    for root, _, files in os.walk(MODELS_DIR):
+      for fn in files:
+        if _is_dat2_filename(fn):
+          try:
+            os.remove(os.path.join(root, fn))
+          except OSError:
+            pass
+
+  # Refresh config scans so new models are visible.
+  global CFG
+  CFG = load_cfg()
+  return {"imported": imported}
 
 def _choose_model_type(is_grayscale: bool) -> str:
   if is_grayscale:
@@ -580,6 +753,7 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(200, b"ok")
       if parsed.path != "/enhance":
         return self._send(404, b"not found")
+      _touch_enhance()
 
       qs = urllib.parse.parse_qs(parsed.query or "")
       url = (qs.get("url") or [""])[0]
@@ -591,6 +765,7 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(400, b"missing url")
 
       # Simple disk cache keyed by url+scale
+      _cleanup_cache_if_needed()
       cache_key = str(abs(hash(f"v{CACHE_VERSION}::{url}::{scale}::{quality}")))
       cache_path = os.path.join(CACHE_DIR, f"{cache_key}.png")
       if os.path.exists(cache_path):
@@ -621,8 +796,55 @@ class Handler(BaseHTTPRequestHandler):
   def do_POST(self):
     try:
       parsed = urllib.parse.urlparse(self.path)
+      if parsed.path == "/shutdown":
+        if self.client_address[0] not in ("127.0.0.1", "::1"):
+          return self._send(403, b"forbidden")
+        threading.Thread(target=self.server.shutdown, daemon=True).start()
+        return self._send(200, b"ok")
+      if parsed.path == "/cache/clear":
+        length = int(self.headers.get("Content-Length", "0"))
+        include_wrapped = False
+        if length > 0:
+          try:
+            payload = json.loads(self.rfile.read(length))
+            include_wrapped = bool(payload.get("include_wrapped", False))
+          except Exception:
+            include_wrapped = False
+        removed = _clear_cache(include_wrapped=include_wrapped)
+        body = json.dumps({"ok": True, "removed": removed}).encode("utf-8")
+        return self._send(200, body, "application/json")
+
+      if parsed.path == "/config":
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0:
+          return self._send(400, b"missing body")
+        payload = json.loads(self.rfile.read(length))
+        global CFG
+        cfg = dict(CFG)
+        for key in ("cache_max_gb", "cache_max_age_days", "allow_dat2", "idle_shutdown_minutes"):
+          if key in payload:
+            cfg[key] = payload[key]
+        CFG = _normalize_cfg(cfg)
+        save_cfg(CFG)
+        body = json.dumps({"ok": True}).encode("utf-8")
+        return self._send(200, body, "application/json")
+
+      if parsed.path == "/models/download":
+        length = int(self.headers.get("Content-Length", "0"))
+        allow_dat2 = bool(CFG.get("allow_dat2", False))
+        if length > 0:
+          try:
+            payload = json.loads(self.rfile.read(length))
+            allow_dat2 = bool(payload.get("allow_dat2", allow_dat2))
+          except Exception:
+            pass
+        result = _download_models(allow_dat2=allow_dat2)
+        body = json.dumps({"ok": True, **result}).encode("utf-8")
+        return self._send(200, body, "application/json")
+
       if parsed.path != "/enhance":
         return self._send(404, b"not found")
+      _touch_enhance()
 
       qs = urllib.parse.parse_qs(parsed.query or "")
       scale = int((qs.get("scale") or [CFG.get("default_scale", 2)])[0])
@@ -637,6 +859,7 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(400, b"empty body")
 
       # Cache by content hash + scale + quality
+      _cleanup_cache_if_needed()
       h = hashlib.sha1(src_bytes + f"::{scale}::{quality}::v{CACHE_VERSION}".encode("utf-8")).hexdigest()
       cache_path = os.path.join(CACHE_DIR, f"{h}.png")
       if os.path.exists(cache_path):
@@ -655,9 +878,39 @@ class Handler(BaseHTTPRequestHandler):
       tb = traceback.format_exc()
       self._send(500, tb.encode("utf-8","ignore")[:8000])
 
+def create_httpd():
+  return ThreadingHTTPServer((HOST, PORT), Handler)
+
+def start_http_server():
+  global _last_enhance_ts, _idle_stop
+  _last_enhance_ts = time.time()
+  _idle_stop = threading.Event()
+  httpd = create_httpd()
+  thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+  thread.start()
+  threading.Thread(target=_idle_monitor, args=(httpd,), daemon=True).start()
+  return httpd, thread
+
+def stop_http_server(httpd):
+  _idle_stop.set()
+  if not httpd:
+    return
+  httpd.shutdown()
+  httpd.server_close()
+
 def main():
+  if "--download-models" in sys.argv:
+    allow_dat2 = "--allow-dat2" in sys.argv
+    result = _download_models(allow_dat2=allow_dat2)
+    print(json.dumps({"ok": True, **result}))
+    return
+
   print(f"[MangaUpscalerHost] listening on http://{HOST}:{PORT}")
-  httpd = ThreadingHTTPServer((HOST, PORT), Handler)
+  global _last_enhance_ts, _idle_stop
+  _last_enhance_ts = time.time()
+  _idle_stop = threading.Event()
+  httpd = create_httpd()
+  threading.Thread(target=_idle_monitor, args=(httpd,), daemon=True).start()
   httpd.serve_forever()
 
 if __name__ == "__main__":

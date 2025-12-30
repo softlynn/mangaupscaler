@@ -29,9 +29,60 @@ chrome.runtime.onInstalled.addListener(async ()=>{
   }
 });
 
+chrome.runtime.onSuspend.addListener(() => {
+  stopNativeHost('suspend');
+});
+
 // MV3 background service worker
 const AI_HOST = 'http://127.0.0.1:48159';
 const BADGE_BG = '#ff7fc8';
+const NATIVE_HOST = 'com.softlynn.manga_upscaler';
+
+async function delay(ms){
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function pingHost(){
+  try{
+    const resp = await fetch(`${AI_HOST}/health`, { cache: 'no-store' });
+    return resp.ok;
+  }catch{
+    return false;
+  }
+}
+
+async function startNativeHost(reason){
+  try{
+    const resp = await chrome.runtime.sendNativeMessage(NATIVE_HOST, { cmd: 'start', reason });
+    return !!resp?.ok;
+  }catch{
+    return false;
+  }
+}
+
+async function stopNativeHost(reason){
+  try{
+    await chrome.runtime.sendNativeMessage(NATIVE_HOST, { cmd: 'stop', reason });
+  }catch{
+    // ignore
+  }
+  try{
+    await fetch(`${AI_HOST}/shutdown`, { method: 'POST' });
+  }catch{
+    // ignore
+  }
+  return !(await pingHost());
+}
+
+async function ensureHostRunning(reason){
+  if (await pingHost()) return true;
+  await startNativeHost(reason);
+  for (let i = 0; i < 10; i++) {
+    if (await pingHost()) return true;
+    await delay(400);
+  }
+  return false;
+}
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
@@ -49,8 +100,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return;
       }
 
+      if (msg?.type === 'HOST_START') {
+        const ok = await ensureHostRunning(msg?.reason || 'manual');
+        sendResponse({ ok });
+        return;
+      }
+
+      if (msg?.type === 'HOST_STOP') {
+        const ok = await stopNativeHost(msg?.reason || 'manual');
+        sendResponse({ ok });
+        return;
+      }
+
       if (msg?.type === 'FETCH_AI_ENHANCE') {
         const { sourceUrl, dataUrl, scale, quality } = msg || {};
+        if (!await ensureHostRunning('enhance')) throw new Error('AI host not running');
         const qs = new URLSearchParams();
         if (typeof scale === 'number') qs.set('scale', String(scale));
         if (quality) qs.set('quality', String(quality));
@@ -70,6 +134,45 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const blob = await resp.blob();
         const outUrl = await blobToDataURL(blob);
         sendResponse({ ok: true, dataUrl: outUrl, model, hostError });
+        return;
+      }
+
+      if (msg?.type === 'HOST_CONFIG') {
+        if (!await ensureHostRunning('config')) throw new Error('AI host not running');
+        const { cacheMaxGb, cacheMaxAgeDays, allowDat2, idleShutdownMinutes } = msg || {};
+        const resp = await fetch(`${AI_HOST}/config`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            cache_max_gb: cacheMaxGb,
+            cache_max_age_days: cacheMaxAgeDays,
+            allow_dat2: allowDat2,
+            idle_shutdown_minutes: idleShutdownMinutes
+          })
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        sendResponse({ ok: true });
+        return;
+      }
+
+      if (msg?.type === 'HOST_CLEAR_CACHE') {
+        if (!await ensureHostRunning('cache')) throw new Error('AI host not running');
+        const resp = await fetch(`${AI_HOST}/cache/clear`, { method: 'POST' });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        sendResponse({ ok: true });
+        return;
+      }
+
+      if (msg?.type === 'HOST_DOWNLOAD_MODELS') {
+        if (!await ensureHostRunning('download')) throw new Error('AI host not running');
+        const allowDat2 = !!msg.allowDat2;
+        const resp = await fetch(`${AI_HOST}/models/download`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ allow_dat2: allowDat2 })
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        sendResponse({ ok: true });
         return;
       }
 

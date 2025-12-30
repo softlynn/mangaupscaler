@@ -42,5 +42,9 @@
     "mangajanai",
     "illustrationjanai"
   ],
-  "residual_add_strength": 0.5
+  "residual_add_strength": 0.5,
+  "cache_max_gb": 1.0,
+  "cache_max_age_days": 0,
+  "allow_dat2": false,
+  "idle_shutdown_minutes": 5
 }

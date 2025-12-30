@@ -1,10 +1,16 @@
 .vs/
+.vscode/
 .git_backup/
 inspiration/
 
 native_host/.venv/
 native_host/cache/
 native_host/models/
+native_host/dist/
+native_host/build/
+native_host/build_tray/
+native_host/build_native/
+native_host/*.spec
 
 __pycache__/
 *.pyc

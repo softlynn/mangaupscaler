@@ -15,7 +15,9 @@ Real-ESRGAN with MangaJaNai/IllustrationJaNai models.
 1) Load the extension:
    - Chrome -> Extensions -> Developer mode -> Load unpacked -> `extension/`
 2) Start the local host:
-   - `native_host/run_host.bat`
+   - `cd native_host`
+   - `.\install_windows.ps1`
+   - `run_host.bat` (tray) or `run_host.bat --console`
    - Open `http://127.0.0.1:48159/health` and confirm `ok`
 3) In the extension popup or settings:
    - Enable AI mode
@@ -36,6 +38,7 @@ Install deps:
 ```
 cd native_host
 .\install_windows.ps1
+.\install_windows.ps1 -AllowDat2   # optional DAT2 models (slowest, highest quality)
 ```
 
 ## Notes

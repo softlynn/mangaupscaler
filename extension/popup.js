@@ -34,8 +34,56 @@ const supportLink = $('supportLink');
 const openSettings = $('openSettings');
 const aiMode = $('aiMode');
 const aiQuality = $('aiQuality');
+const siteStatus = $('siteStatus');
 
 let currentHost = null;
+let siteLocked = false;
+
+function isHostAllowed(host, whitelist){
+  if (!host) return false;
+  const wh = whitelist || {};
+  const any = Object.keys(wh).length > 0;
+  if (!any) {
+    return (host === 'comix.to' || host === 'weebcentral.com' || host.endsWith('.weebcentral.com'));
+  }
+  return !!wh[host];
+}
+
+function setControlDisabled(el, on){
+  if (!el) return;
+  el.disabled = !!on;
+  el.classList.toggle('controlDisabled', !!on);
+}
+
+function setRowDisabled(el, on){
+  if (!el) return;
+  const row = el.closest('.row');
+  if (row) row.classList.toggle('controlDisabled', !!on);
+}
+
+function applySiteLock(allowed){
+  siteLocked = !allowed;
+  [enabledToggle, autoToggle, aiMode].forEach(t => t.classList.toggle('locked', siteLocked));
+  [scale, pre, sharp, denoise, aiQuality].forEach(el => setControlDisabled(el, siteLocked));
+  [run, runPrimary].forEach(btn => { if (btn) btn.disabled = siteLocked; });
+  if (siteLocked){
+    setToggle(enabledToggle, false);
+    if (siteStatus) siteStatus.textContent = 'Disabled on this site. Toggle "Only on this site" to enable.';
+  } else if (siteStatus) {
+    siteStatus.textContent = '';
+  }
+}
+
+function applyAiModeState(on){
+  const isOn = !!on;
+  setControlDisabled(aiQuality, siteLocked || !isOn);
+  setRowDisabled(sharp, siteLocked || isOn);
+  setRowDisabled(denoise, siteLocked || isOn);
+  if (!siteLocked){
+    sharp.disabled = isOn;
+    denoise.disabled = isOn;
+  }
+}
 
 function setToggle(el, on){
   el.classList.toggle('on', !!on);
@@ -70,6 +118,9 @@ async function load(){
   const wh = s.whitelist || {};
   const siteOn = currentHost ? !!wh[currentHost] : false;
   setToggle(siteToggle, siteOn);
+  const allowed = isHostAllowed(currentHost, wh);
+  applySiteLock(allowed);
+  applyAiModeState(!!s.aiMode);
 
   siteLink.addEventListener('click', (e)=>{ e.preventDefault(); chrome.tabs.create({url:'https://softlynn.carrd.co/#'}); });
   openSettings.addEventListener('click', ()=>{
@@ -92,13 +143,20 @@ async function sendCommand(cmd){
 }
 
 enabledToggle.addEventListener('click', async ()=>{
+  if (siteLocked) return;
   const on = !getToggle(enabledToggle);
   setToggle(enabledToggle, on);
   await save({enabled:on});
   await sendCommand({type:'SETTINGS_UPDATED'});
+  if (!on) {
+    await sendCommand({type:'HOST_STOP', reason:'disabled'});
+  } else if (getToggle(aiMode)) {
+    await sendCommand({type:'HOST_START', reason:'enabled'});
+  }
 });
 
 autoToggle.addEventListener('click', async ()=>{
+  if (siteLocked) return;
   const on = !getToggle(autoToggle);
   setToggle(autoToggle, on);
   await save({autoPanel:on});
@@ -114,49 +172,60 @@ siteToggle.addEventListener('click', async ()=>{
   setToggle(siteToggle, on);
   await save({whitelist: wh});
   await sendCommand({type:'SETTINGS_UPDATED'});
+  applySiteLock(isHostAllowed(currentHost, wh));
 });
 
 aiMode.addEventListener('click', async ()=>{
+  if (siteLocked) return;
   const on = !getToggle(aiMode);
   setToggle(aiMode, on);
   await save({ aiMode: on });
   await sendCommand({ type:'SETTINGS_UPDATED' });
+  await sendCommand({ type: on ? 'HOST_START' : 'HOST_STOP', reason:'ai_mode' });
+  applyAiModeState(on);
 });
 
 aiQuality.addEventListener('change', async ()=>{
+  if (siteLocked) return;
   await save({ aiQuality: String(aiQuality.value) });
   await sendCommand({ type:'SETTINGS_UPDATED' });
 });
 
 scale.addEventListener('change', async ()=>{
+  if (siteLocked) return;
   await save({scale: Number(scale.value)});
   await sendCommand({type:'SETTINGS_UPDATED'});
 });
 
 pre.addEventListener('input', async ()=>{
+  if (siteLocked) return;
   preN.textContent = pre.value;
   await save({preUpscaleCount: Number(pre.value)});
   await sendCommand({type:'SETTINGS_UPDATED'});
 });
 
 sharp.addEventListener('input', async ()=>{
+  if (siteLocked) return;
   sharpVal.textContent = Number(sharp.value).toFixed(2);
   await save({sharpenStrength: Number(sharp.value)});
   await sendCommand({type:'SETTINGS_UPDATED'});
 });
 
 denoise.addEventListener('input', async ()=>{
+  if (siteLocked) return;
   dnVal.textContent = Number(denoise.value).toFixed(2);
   await save({denoiseStrength: Number(denoise.value)});
   await sendCommand({type:'SETTINGS_UPDATED'});
 });
 
 run.addEventListener('click', async ()=>{
+  if (siteLocked) return;
   await sendCommand({type:'RUN_ONCE', preload:false});
   window.close();
 });
 
 runPrimary.addEventListener('click', async ()=>{
+  if (siteLocked) return;
   await sendCommand({type:'RUN_ONCE', preload:true});
   window.close();
 });

@@ -24,6 +24,13 @@
     .card{ background:var(--card); border:1px solid var(--border); border-radius:18px; padding:12px; box-shadow:0 12px 28px rgba(0,0,0,.25); }
     .row{ display:flex; align-items:center; justify-content:space-between; gap:12px; margin:10px 0; }
     label{ color:var(--muted); }
+    .section{
+      margin-top:8px;
+      font-size:11px;
+      color:var(--muted);
+      letter-spacing:.4px;
+      text-transform:uppercase;
+    }
     .pill{ display:flex; gap:8px; }
     select, input[type="range"]{ width: 150px; }
     select{
@@ -43,6 +50,16 @@
     }
     .toggle.on{ background:rgba(255,127,200,.25); border-color: rgba(255,127,200,.55); }
     .toggle.on .knob{ left:22px; background: var(--accent); }
+    .toggle.locked{ opacity:.45; cursor:not-allowed; }
+    .controlDisabled{
+      opacity:.45;
+      pointer-events:none;
+    }
+    .note{
+      margin:8px 0 0;
+      color:var(--muted);
+      font-size:11px;
+    }
     .btns{ display:flex; gap:10px; margin-top:10px; }
     button{
       flex:1; border:1px solid var(--border); background:#0f0d13; color:var(--text);
@@ -107,6 +124,7 @@
         <div id="autoToggle" class="toggle"><div class="knob"></div></div>
       </div>
 
+      <div class="section">AI Enhance</div>
       <div class="row">
         <label>AI enhance (local host)</label>
         <div id="aiMode" class="toggle"><div class="knob"></div></div>
@@ -121,8 +139,9 @@
         </select>
       </div>
 
+      <div class="section">Browser Enhance</div>
       <div class="row">
-        <label>Scale</label>
+        <label>Scale (AI + browser)</label>
         <select id="scale">
           <option value="2">2x</option>
           <option value="3">3x</option>
@@ -136,12 +155,12 @@
       </div>
 
       <div class="row">
-        <label>Sharpen: <span id="sharpVal">0.35</span></label>
+        <label>Sharpen (browser): <span id="sharpVal">0.35</span></label>
         <input id="sharp" type="range" min="0" max="1" step="0.05" />
       </div>
 
       <div class="row">
-        <label>Denoise: <span id="dnVal">0.15</span></label>
+        <label>Denoise (browser): <span id="dnVal">0.15</span></label>
         <input id="denoise" type="range" min="0" max="0.6" step="0.05" />
       </div>
 
@@ -156,6 +175,7 @@
         <button id="openSettings" class="ghost" title="Open full settings">Settings</button>
       </div>
 
+      <div id="siteStatus" class="note"></div>
       <div class="tiny">Tip: 3x + Sharpen 0.35-0.55 looks best on 1440p.</div>
 
       <div id="credits" class="credits">

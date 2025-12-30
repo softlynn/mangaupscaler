@@ -13,7 +13,7 @@
         <img class="logo" src="icons/icon48.png" alt="">
         <div>
           <div class="title">Manga Upscaler</div>
-          <div class="subtitle">Full settings • per-site whitelist</div>
+          <div class="subtitle">Full settings + per-site whitelist</div>
         </div>
       </div>
       <div class="actions">
@@ -43,7 +43,7 @@
       <div class="row">
         <div>
           <div class="label">AI Enhance (MangaJaNai Host)</div>
-          <div class="sub">Best quality + removes artifacts • requires local host running</div>
+          <div class="sub">Best quality + removes artifacts; requires local host running</div>
         </div>
         <div id="aiMode" class="toggle"><div class="knob"></div></div>
       </div>
@@ -60,13 +60,21 @@
         </select>
       </div>
 
+      <div class="row">
+        <div>
+          <div class="label">Allow DAT2 (highest quality, very slow)</div>
+          <div class="sub">Uses Illustration DAT2 when available for Best quality</div>
+        </div>
+        <div id="allowDat2" class="toggle"><div class="knob"></div></div>
+      </div>
+
       <div class="grid2">
         <label class="field">
-          <div>Scale</div>
+          <div>Scale (AI + browser)</div>
           <select id="scale">
-            <option value="2">2×</option>
-            <option value="3">3×</option>
-            <option value="4">4×</option>
+            <option value="2">2x</option>
+            <option value="3">3x</option>
+            <option value="4">4x</option>
           </select>
         </label>
 
@@ -92,11 +100,42 @@
       </div>
 
       <p class="hint">
-        Tip: for best clarity, turn on <b>AI Enhance</b> and run the local host. MangaJaNai models are designed to restore halftones and clean JPEG/moiré artifacts.
+        Tip: for best clarity, turn on <b>AI Enhance</b> and run the local host. MangaJaNai models are designed to restore halftones and clean JPEG/moire artifacts.
       </p>
       <p class="hint">
-        Real-ESRGAN “ncnn-vulkan” needs NCNN-format models (.bin/.param), not raw .pth files.
+        Real-ESRGAN ncnn-vulkan needs NCNN-format models (.bin/.param), not raw .pth files.
       </p>
+    </section>
+
+    <section class="card">
+      <h3>Cache</h3>
+      <div class="grid2">
+        <label class="field">
+          <div>Cache limit (GB)</div>
+          <input id="cacheMaxGb" type="number" min="0" step="0.1" />
+          <div class="val" id="cacheMaxGbVal"></div>
+        </label>
+
+        <label class="field">
+          <div>Max age (days)</div>
+          <input id="cacheMaxAgeDays" type="number" min="0" step="1" />
+          <div class="val" id="cacheMaxAgeDaysVal"></div>
+        </label>
+      </div>
+      <div class="grid2">
+        <label class="field">
+          <div>Idle shutdown (minutes)</div>
+          <input id="idleShutdownMinutes" type="number" min="0" step="1" />
+          <div class="val" id="idleShutdownMinutesVal"></div>
+        </label>
+      </div>
+      <div class="row">
+        <div>
+          <div class="label">Clear host cache</div>
+          <div class="sub">Removes stored enhanced images (keeps models)</div>
+        </div>
+        <button id="clearCache" class="btn">Clear cache</button>
+      </div>
     </section>
 
     <section class="card">
@@ -105,7 +144,7 @@
           <h3>Whitelist (per site)</h3>
           <div class="sub">Extension is OFF everywhere unless a site is enabled here.</div>
         </div>
-        <input id="filter" placeholder="Search domains…" />
+        <input id="filter" placeholder="Search domains" />
       </div>
 
       <div id="whitelistList" class="wlList"></div>
@@ -133,11 +172,18 @@
 
     <section class="card">
       <h3>Local AI Host</h3>
+      <div class="row">
+        <div>
+          <div class="label">Download MangaJaNai models</div>
+          <div class="sub">Downloads Manga + Illustration models from the official release</div>
+        </div>
+        <button id="downloadModels" class="btn">Download</button>
+      </div>
       <ol class="steps">
         <li>Unzip the <code>native_host/</code> folder from this extension zip.</li>
-        <li>Run <code>install_windows.ps1</code> (it registers Chrome Native Messaging + starts a local server).</li>
-        <li>Download MangaJaNai models and place them in <code>models/</code>.</li>
-        <li>Install Python deps (Torch + realesrgan). Then run <code>run_host.bat</code>.</li>
+        <li>Run <code>install_windows.ps1</code> (installs deps, registers native messaging, downloads models).</li>
+        <li>Enable AI Enhance in the popup; the tray host will start on demand.</li>
+        <li>Optional: run <code>run_host.bat --console</code> for debugging.</li>
       </ol>
       <p class="hint">When running, the host serves enhanced images at <code>http://127.0.0.1:48159/enhance</code>. The extension swaps the panel image to that URL in AI mode.</p>
     </section>
