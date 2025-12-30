@@ -49,7 +49,10 @@ function Get-GpuComputeCapability {
     $fallback = Join-Path ${env:ProgramFiles} "NVIDIA Corporation\NVSMI\nvidia-smi.exe"
     if (Test-Path $fallback) { $nvidiaSmi = $fallback }
   }
-  if (-not $nvidiaSmi) { return $null }
+  if (-not $nvidiaSmi) {
+    Write-Log "nvidia-smi not found; using default CUDA index."
+    return $null
+  }
   Write-Log "Using nvidia-smi at $nvidiaSmi"
   try {
     $raw = & $nvidiaSmi --query-gpu=compute_cap --format=csv,noheader 2>$null
@@ -71,6 +74,20 @@ function Get-GpuComputeCapability {
   $maxCap = ($caps | Measure-Object -Maximum).Maximum
   Write-Log "Detected GPU compute capability: $maxCap"
   return $maxCap
+}
+
+function Write-TempRequirements {
+  param([string]$SourcePath)
+  $tmp = Join-Path $env:TEMP "mu_requirements.txt"
+  $lines = @()
+  foreach ($line in (Get-Content -Path $SourcePath -ErrorAction SilentlyContinue)) {
+    if (-not $line) { continue }
+    if ($line -match '^\s*#') { continue }
+    if ($line -match '^\s*(torch|torchvision|torchaudio)\b') { continue }
+    $lines += $line
+  }
+  [System.IO.File]::WriteAllLines($tmp, $lines)
+  return $tmp
 }
 
 function Find-ExtensionId {
@@ -234,7 +251,13 @@ Write-Log "Using venv python: $venvPython"
 Write-Host "Installing Python dependencies... (this can take several minutes)"
 Write-Log "Installing Python dependencies."
 Invoke-Logged -Label "pip upgrade" -Command $venvPython -CmdArgs @("-m","pip","install","--disable-pip-version-check","--upgrade","pip")
-Invoke-Logged -Label "pip requirements" -Command $venvPython -CmdArgs @("-m","pip","install","--disable-pip-version-check","-r","requirements.txt")
+Write-Log "Installing requirements (excluding torch packages)."
+$reqPath = Join-Path $PSScriptRoot "requirements.txt"
+$tmpReq = Write-TempRequirements -SourcePath $reqPath
+Invoke-Logged -Label "pip requirements" -Command $venvPython -CmdArgs @("-m","pip","install","--disable-pip-version-check","-r",$tmpReq)
+if ($tmpReq -and (Test-Path $tmpReq)) {
+  try { Remove-Item $tmpReq -Force } catch { }
+}
 
 # CUDA Torch build (adjust CudaIndexUrl if needed)
 Write-Host "Installing PyTorch (CUDA)... (this can take several minutes)"
@@ -243,9 +266,9 @@ $torchPre = $false
 if (-not $PSBoundParameters.ContainsKey("CudaIndexUrl")) {
   $cap = Get-GpuComputeCapability
   if ($cap -ge 12.0) {
-    $torchIndexUrl = "https://download.pytorch.org/whl/nightly/cu124"
+    $torchIndexUrl = "https://download.pytorch.org/whl/nightly/cu129"
     $torchPre = $true
-    $msg = "Detected GPU compute capability $cap; using nightly CUDA 12.4 build."
+    $msg = "Detected GPU compute capability $cap; using nightly CUDA 12.9 build."
     Write-Host $msg
     Write-Log $msg
   }
