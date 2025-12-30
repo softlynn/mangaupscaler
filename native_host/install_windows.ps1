@@ -16,6 +16,10 @@ param(
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
+if (-not $LogPath) {
+  $LogPath = Join-Path $env:APPDATA "MangaUpscalerHost\install.log"
+}
+
 function Write-Log {
   param([string]$Message)
   if (-not $LogPath) { return }
@@ -24,6 +28,37 @@ function Write-Log {
     Add-Content -Path $LogPath -Value "[$ts] $Message"
   } catch {
     # ignore log errors
+  }
+}
+
+function Ensure-LogPath {
+  if (-not $LogPath) { return }
+  try {
+    $logDir = Split-Path $LogPath -Parent
+    if ($logDir -and -not (Test-Path $logDir)) {
+      New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    }
+    if (-not (Test-Path $LogPath)) {
+      New-Item -ItemType File -Path $LogPath -Force | Out-Null
+    }
+  } catch {
+    # ignore log setup errors
+  }
+}
+
+function Sync-LogBackup {
+  if (-not $LogPath) { return }
+  $backup = Join-Path $env:LOCALAPPDATA "MangaUpscalerHost\install.log"
+  if ($backup -and ($LogPath -ne $backup)) {
+    try {
+      $backupDir = Split-Path $backup -Parent
+      if ($backupDir -and -not (Test-Path $backupDir)) {
+        New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+      }
+      Copy-Item -Path $LogPath -Destination $backup -Force
+    } catch {
+      # ignore backup errors
+    }
   }
 }
 
@@ -211,13 +246,8 @@ function Find-ExtensionId {
   return $byName
 }
 
-if ($LogPath) {
-  try {
-    if (-not (Test-Path $LogPath)) {
-      New-Item -ItemType File -Path $LogPath -Force | Out-Null
-    }
-  } catch { }
-}
+Ensure-LogPath
+Write-Log ("Install log path: " + $LogPath)
 
 function Write-LogLines {
   param([string[]]$Lines)
@@ -352,6 +382,7 @@ if ($runDeps) {
   if ($tmpReq -and (Test-Path $tmpReq)) {
     try { Remove-Item $tmpReq -Force } catch { }
   }
+  Sync-LogBackup
 }
 
 # CUDA Torch build (adjust CudaIndexUrl if needed)
@@ -429,10 +460,12 @@ print(json.dumps(info))
     Write-Log ("CUDA check parse failed: " + $_.Exception.Message)
   }
   try { Remove-Item $cudaCheckPath -Force } catch { }
+  Sync-LogBackup
 }
 
 if ($phaseOnly) {
   Write-Log "Phase complete."
+  Sync-LogBackup
   if (-not $NoPause) {
     pause
   }
@@ -483,6 +516,7 @@ if ($runModels) {
   $dlArgs = @("host_server.py", "--download-models")
   if ($AllowDat2) { $dlArgs += "--allow-dat2" }
   Invoke-Logged -Label "model download" -Command $venvPython -CmdArgs $dlArgs
+  Sync-LogBackup
 }
 
 Write-Host ""
@@ -493,3 +527,4 @@ Write-Host "If Chrome is open, reload the extension."
 if (-not $NoPause) {
   pause
 }
+Sync-LogBackup
