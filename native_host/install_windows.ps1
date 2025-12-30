@@ -46,22 +46,6 @@ function Ensure-LogPath {
   }
 }
 
-function Sync-LogBackup {
-  if (-not $LogPath) { return }
-  $backup = Join-Path $env:LOCALAPPDATA "MangaUpscalerHost\install.log"
-  if ($backup -and ($LogPath -ne $backup)) {
-    try {
-      $backupDir = Split-Path $backup -Parent
-      if ($backupDir -and -not (Test-Path $backupDir)) {
-        New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
-      }
-      Copy-Item -Path $LogPath -Destination $backup -Force
-    } catch {
-      # ignore backup errors
-    }
-  }
-}
-
 function Resolve-Exec {
   param([string]$Name)
   try {
@@ -96,8 +80,9 @@ function Find-NvidiaSmi {
   if ($env:ProgramFiles) {
     $candidates += (Join-Path $env:ProgramFiles "NVIDIA Corporation\NVSMI\nvidia-smi.exe")
   }
-  if ($env:"ProgramFiles(x86)") {
-    $candidates += (Join-Path $env:"ProgramFiles(x86)" "NVIDIA Corporation\NVSMI\nvidia-smi.exe")
+  $programFilesX86 = ${env:ProgramFiles(x86)}
+  if ($programFilesX86) {
+    $candidates += (Join-Path $programFilesX86 "NVIDIA Corporation\NVSMI\nvidia-smi.exe")
   }
   $candidates += (Join-Path $env:WINDIR "System32\nvidia-smi.exe")
 
@@ -285,7 +270,7 @@ function Invoke-Logged {
   $ErrorActionPreference = $prevErrorAction
   if ($null -ne $prevNative) { $PSNativeCommandUseErrorActionPreference = $prevNative }
   if ($output) {
-    Write-LogLines -Lines $output
+Write-LogLines -Lines $output
   }
   if ($LASTEXITCODE -ne 0) {
     Write-Log ("Exit code: " + $LASTEXITCODE)
@@ -361,14 +346,21 @@ if (-not (Test-Path $venvPython)) {
 Write-Log "Using venv python: $venvPython"
 
 $phaseOnly = $DepsOnly -or $TorchOnly -or $ModelsOnly
+$phaseName = ""
+$runPhaseCount = 0
 $runDeps = $true
 $runTorch = $true
 $runModels = -not $SkipModelDownload
 if ($phaseOnly) {
   $runDeps = $DepsOnly
   $runTorch = $TorchOnly
-  $runModels = $ModelsOnly
+  $runModels = $ModelsOnly -and (-not $SkipModelDownload)
+  $SkipNativeMessaging = $true
 }
+if ($runDeps) { $runPhaseCount += 1; $phaseName += "deps " }
+if ($runTorch) { $runPhaseCount += 1; $phaseName += "torch " }
+if ($runModels) { $runPhaseCount += 1; $phaseName += "models " }
+Write-Log ("Requested phases: " + ($phaseName.Trim()))
 
 if ($runDeps) {
   Write-Log "Phase: dependencies"
@@ -382,99 +374,201 @@ if ($runDeps) {
   if ($tmpReq -and (Test-Path $tmpReq)) {
     try { Remove-Item $tmpReq -Force } catch { }
   }
-  Sync-LogBackup
 }
 
 # CUDA Torch build (adjust CudaIndexUrl if needed)
 if ($runTorch) {
   Write-Log "Phase: torch"
   Write-Host "Installing PyTorch (CUDA)... (this can take several minutes)"
-  $torchIndexUrl = $CudaIndexUrl
-  $torchPre = $false
-  $cap = $null
-  if (-not $PSBoundParameters.ContainsKey("CudaIndexUrl")) {
-    Write-Log "GPU preflight check"
-    $cap = Get-GpuComputeCapability
-    if ($null -ne $cap) {
-      Write-Host ("Detected GPU compute capability: " + $cap)
-    } else {
-      Write-Host "Could not detect GPU compute capability; defaulting to CUDA 12.8."
-      Write-Log "Compute capability unknown; defaulting CUDA index to cu128."
-      $torchIndexUrl = "https://download.pytorch.org/whl/cu128"
-    }
-    if ($null -ne $cap -and $cap -ge 12.0) {
-      $torchIndexUrl = "https://download.pytorch.org/whl/cu128"
-      $torchPre = $false
-      $msg = "Detected GPU compute capability $cap; using CUDA 12.8 build."
-      Write-Host $msg
-      Write-Log $msg
-    }
-  }
-  Write-Log "Installing Torch from $torchIndexUrl"
-  $torchArgs = @("-m","pip","install","--disable-pip-version-check","--force-reinstall","--index-url",$torchIndexUrl,"torch","torchvision","torchaudio")
-  if ($torchPre) { $torchArgs = @("-m","pip","install","--disable-pip-version-check","--force-reinstall","--pre","--index-url",$torchIndexUrl,"torch","torchvision","torchaudio") }
-  Invoke-Logged -Label "pip torch cuda" -Command $venvPython -CmdArgs $torchArgs
-  Invoke-Logged -Label "pip numpy" -Command $venvPython -CmdArgs @("-m","pip","install","--disable-pip-version-check","numpy==2.2.6")
-
-  $cudaCheckScript = @'
-import json
-import torch
-
-info = {
-    "torch_version": torch.__version__,
-    "cuda_version": torch.version.cuda,
-    "cuda_available": torch.cuda.is_available(),
-}
-if torch.cuda.is_available():
-    info["device_name"] = torch.cuda.get_device_name(0)
-    cap = torch.cuda.get_device_capability(0)
-    info["device_capability"] = f"{cap[0]}.{cap[1]}"
-    try:
-        info["arch_list"] = torch.cuda.get_arch_list()
-    except Exception as exc:
-        info["arch_list_error"] = str(exc)
-print(json.dumps(info))
-'@
-  $cudaCheckPath = Write-TempPythonScript -Name "mu_cuda_check.py" -Content $cudaCheckScript
-  Write-Log "CUDA check"
-  Write-Log ("Command: " + $venvPython + " " + $cudaCheckPath)
-  $cudaOut = & $venvPython $cudaCheckPath 2>&1
-  Write-LogLines -Lines $cudaOut
+  Write-Log "GPU preflight check"
+  $nvidiaSmiPath = Find-NvidiaSmi
+  $nvidiaGpuName = $null
   try {
-    $jsonLine = $cudaOut | Where-Object { $_ -match '^\s*\{' } | Select-Object -Last 1
-    if ($jsonLine) {
-      $info = $jsonLine | ConvertFrom-Json
-      if ($info.cuda_available -and $info.device_capability -and $info.arch_list) {
-        $capStr = ($info.device_capability -replace '\.','')
-        $sm = "sm_$capStr"
-        if ($info.arch_list -notcontains $sm) {
-          $warn = "CUDA build does not include $sm; GPU acceleration may fail. Re-run installer with -CudaIndexUrl to a compatible build."
-          Write-Host $warn
-          Write-Log $warn
-        }
-      } elseif (-not $info.cuda_available) {
-        $warn = "CUDA not available after install; using CPU (slow)."
-        Write-Host $warn
-        Write-Log $warn
-      }
+    $gpu = Get-CimInstance Win32_VideoController | Where-Object { $_.Name -match 'NVIDIA' } | Select-Object -First 1
+    if ($gpu -and $gpu.Name) {
+      $nvidiaGpuName = [string]$gpu.Name
+      Write-Log ("Detected NVIDIA GPU: " + $nvidiaGpuName)
     }
   } catch {
-    Write-Log ("CUDA check parse failed: " + $_.Exception.Message)
+    $nvidiaGpuName = $null
   }
-  try { Remove-Item $cudaCheckPath -Force } catch { }
-  Sync-LogBackup
+  $requireCuda = ($null -ne $nvidiaSmiPath) -or ($null -ne $nvidiaGpuName)
+
+  $cap = Get-GpuComputeCapability
+  $requiredSm = $null
+  if ($null -ne $cap) {
+    Write-Host ("Detected GPU compute capability: " + $cap)
+    try {
+      $major = [int][math]::Floor($cap)
+      $minor = [int][math]::Round(($cap - $major) * 10)
+      if ($minor -lt 0) { $minor = 0 }
+      $capDigits = "$major$minor"
+      if ($capDigits -match '^[0-9]+$') {
+        $requiredSm = "sm_$capDigits"
+      }
+    } catch {
+      $requiredSm = $null
+    }
+  } else {
+    Write-Host "Could not detect GPU compute capability; defaulting to CUDA 12.8 (cu128)."
+    Write-Log "Compute capability unknown; defaulting CUDA index to cu128."
+  }
+
+  $indexUrls = @()
+  if ($PSBoundParameters.ContainsKey("CudaIndexUrl")) {
+    $indexUrls = @($CudaIndexUrl)
+    Write-Log ("CudaIndexUrl override: " + $CudaIndexUrl)
+  } else {
+    if ($null -eq $cap -or $cap -ge 12.0) {
+      $indexUrls = @(
+        "https://download.pytorch.org/whl/cu128",
+        "https://download.pytorch.org/whl/nightly/cu128",
+        "https://download.pytorch.org/whl/nightly/cu129"
+      )
+      if ($null -ne $cap -and $cap -ge 12.0) {
+        $msg = "Detected GPU compute capability $cap; using CUDA 12.8+ builds."
+        Write-Host $msg
+        Write-Log $msg
+      } else {
+        Write-Log "Compute capability unknown; trying CUDA 12.8+ builds (forced cu128)."
+      }
+    } else {
+      $indexUrls = @("https://download.pytorch.org/whl/cu121")
+      Write-Log ("Detected GPU compute capability " + $cap + "; using CUDA 12.1 build.")
+    }
+  }
+
+  function Test-TorchCuda {
+    param(
+      [string]$PythonExe,
+      [string]$RequiredSm,
+      [bool]$RequireCuda
+    )
+    $cudaCheckScript = @'
+import json
+import os
+import traceback
+
+info = {"ok": False}
+try:
+    import torch
+    info.update(
+        {
+            "torch_version": torch.__version__,
+            "cuda_version": torch.version.cuda,
+            "cuda_available": torch.cuda.is_available(),
+        }
+    )
+    if torch.cuda.is_available():
+        info["device_name"] = torch.cuda.get_device_name(0)
+        cap = torch.cuda.get_device_capability(0)
+        info["device_capability"] = f"{cap[0]}.{cap[1]}"
+        try:
+            info["arch_list"] = torch.cuda.get_arch_list()
+        except Exception as exc:
+            info["arch_list_error"] = str(exc)
+        # Run a tiny op to surface "no kernel image" issues early.
+        try:
+            x = torch.ones((1,), device="cuda")
+            y = x + 1
+            torch.cuda.synchronize()
+            info["cuda_smoke_test"] = True
+        except Exception as exc:
+            info["cuda_smoke_test"] = False
+            info["cuda_smoke_error"] = str(exc)
+    info["ok"] = True
+except Exception as exc:
+    info["error"] = str(exc)
+    info["traceback"] = traceback.format_exc(limit=3)
+print(json.dumps(info))
+'@
+    $cudaCheckPath = Write-TempPythonScript -Name "mu_cuda_check.py" -Content $cudaCheckScript
+    Write-Log "CUDA check"
+    Write-Log ("Command: " + $PythonExe + " " + $cudaCheckPath)
+    $cudaOut = & $PythonExe $cudaCheckPath 2>&1
+    Write-LogLines -Lines $cudaOut
+    try { Remove-Item $cudaCheckPath -Force } catch { }
+
+    $jsonLine = $cudaOut | Where-Object { $_ -match '^\s*\{' } | Select-Object -Last 1
+    if (-not $jsonLine) {
+      return @{ ok = $false; reason = "cuda_check_no_json" }
+    }
+    try {
+      $info = $jsonLine | ConvertFrom-Json
+    } catch {
+      return @{ ok = $false; reason = "cuda_check_parse_failed" }
+    }
+    if (-not $info.ok) {
+      return @{ ok = $false; reason = "cuda_check_failed"; info = $info }
+    }
+    if (-not $info.cuda_available) {
+      if ($RequireCuda) {
+        return @{ ok = $false; reason = "cuda_not_available"; info = $info }
+      }
+      return @{ ok = $true; reason = "cuda_not_available_allowed"; info = $info }
+    }
+    if ($RequiredSm -and $info.arch_list -and ($info.arch_list -notcontains $RequiredSm)) {
+      return @{ ok = $false; reason = "missing_arch"; info = $info }
+    }
+    if ($info.PSObject.Properties.Name -contains "cuda_smoke_test" -and (-not $info.cuda_smoke_test)) {
+      return @{ ok = $false; reason = "cuda_smoke_failed"; info = $info }
+    }
+    return @{ ok = $true; reason = "ok"; info = $info }
+  }
+
+  $torchInstalled = $false
+  foreach ($idx in $indexUrls) {
+    $isNightly = ($idx -match '/nightly/')
+    Write-Log ("Installing Torch from " + $idx)
+    Write-Host ("Installing PyTorch from: " + $idx)
+    try {
+      $torchArgs = @("-m","pip","install","--disable-pip-version-check","--force-reinstall","--index-url",$idx,"torch","torchvision","torchaudio")
+      if ($isNightly) {
+        $torchArgs = @("-m","pip","install","--disable-pip-version-check","--force-reinstall","--pre","--index-url",$idx,"torch","torchvision","torchaudio")
+      }
+      Invoke-Logged -Label "pip torch cuda" -Command $venvPython -CmdArgs $torchArgs
+      Invoke-Logged -Label "pip numpy" -Command $venvPython -CmdArgs @("-m","pip","install","--disable-pip-version-check","numpy==2.2.6")
+    } catch {
+      Write-Log ("Torch install failed for index " + $idx + ": " + $_.Exception.Message)
+      continue
+    }
+
+    $test = Test-TorchCuda -PythonExe $venvPython -RequiredSm $requiredSm -RequireCuda $requireCuda
+    if ($test.ok) {
+      $torchInstalled = $true
+      Write-Log "CUDA validation passed."
+      break
+    }
+    $reason = $test.reason
+    Write-Log ("CUDA validation failed: " + $reason)
+    if ($reason -eq "missing_arch" -and $requiredSm) {
+      $warn = "CUDA build does not include $requiredSm; trying another build."
+      Write-Host $warn
+      Write-Log $warn
+    } elseif ($reason -eq "cuda_not_available") {
+      $warn = "CUDA not available after install; trying another build."
+      Write-Host $warn
+      Write-Log $warn
+    } elseif ($reason -eq "cuda_smoke_failed") {
+      $warn = "CUDA smoke test failed; trying another build."
+      Write-Host $warn
+      Write-Log $warn
+    } else {
+      Write-Host ("CUDA validation failed (" + $reason + "); trying another build.")
+    }
+  }
+
+  if (-not $torchInstalled) {
+    $msg = "Failed to install a working CUDA-enabled PyTorch build. See install.log for details."
+    Write-Host $msg
+    Write-Log $msg
+    if ($requireCuda) {
+      throw $msg
+    }
+  }
 }
 
-if ($phaseOnly) {
-  Write-Log "Phase complete."
-  Sync-LogBackup
-  if (-not $NoPause) {
-    pause
-  }
-  exit 0
-}
-
-if (-not $SkipNativeMessaging) {
+if (-not $phaseOnly -and -not $SkipNativeMessaging) {
   # Register native messaging host for Chrome
   $extensionId = $null
   $extensionPath = Join-Path $PSScriptRoot "..\extension"
@@ -518,7 +612,14 @@ if ($runModels) {
   $dlArgs = @("host_server.py", "--download-models")
   if ($AllowDat2) { $dlArgs += "--allow-dat2" }
   Invoke-Logged -Label "model download" -Command $venvPython -CmdArgs $dlArgs
-  Sync-LogBackup
+}
+
+if ($phaseOnly) {
+  Write-Log "Phase complete."
+  if (-not $NoPause) {
+    pause
+  }
+  exit 0
 }
 
 Write-Host ""
@@ -529,4 +630,3 @@ Write-Host "If Chrome is open, reload the extension."
 if (-not $NoPause) {
   pause
 }
-Sync-LogBackup

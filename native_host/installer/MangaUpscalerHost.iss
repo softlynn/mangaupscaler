@@ -32,9 +32,9 @@ Name: "{app}\\cache"
 Root: HKCU; Subkey: "Software\\Google\\Chrome\\NativeMessagingHosts\\com.softlynn.manga_upscaler"; ValueType: string; ValueName: ""; ValueData: "{app}\\native_messaging_manifest.json"; Flags: uninsdeletekey
 
 [Run]
-Filename: "{sysnative}\\WindowsPowerShell\\v1.0\\powershell.exe"; Parameters: "-NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\\install_windows.ps1"" -SkipNativeMessaging -DepsOnly -NoPause -LogPath ""{userappdata}\\MangaUpscalerHost\\install.log"""; StatusMsg: "Installing Python dependencies..."; Flags: waituntilterminated runhidden skipifsilent
-Filename: "{sysnative}\\WindowsPowerShell\\v1.0\\powershell.exe"; Parameters: "-NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\\install_windows.ps1"" -SkipNativeMessaging -TorchOnly -NoPause -LogPath ""{userappdata}\\MangaUpscalerHost\\install.log"""; StatusMsg: "Installing PyTorch (CUDA)..."; Flags: waituntilterminated runhidden skipifsilent
-Filename: "{sysnative}\\WindowsPowerShell\\v1.0\\powershell.exe"; Parameters: "-NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\\install_windows.ps1"" -SkipNativeMessaging -ModelsOnly -NoPause -LogPath ""{userappdata}\\MangaUpscalerHost\\install.log"""; StatusMsg: "Downloading MangaJaNai models..."; Flags: waituntilterminated runhidden skipifsilent
+Filename: "{sysnative}\\WindowsPowerShell\\v1.0\\powershell.exe"; Parameters: "-NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\\install_windows.ps1"" -SkipNativeMessaging -DepsOnly -NoPause -LogPath ""{app}\\install.log"""; StatusMsg: "Phase 1/3: Installing Python dependencies..."; Flags: waituntilterminated runhidden skipifsilent
+Filename: "{sysnative}\\WindowsPowerShell\\v1.0\\powershell.exe"; Parameters: "-NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\\install_windows.ps1"" -SkipNativeMessaging -TorchOnly -NoPause -LogPath ""{app}\\install.log"""; StatusMsg: "Phase 2/3: Installing PyTorch (CUDA)..."; Flags: waituntilterminated runhidden skipifsilent
+Filename: "{sysnative}\\WindowsPowerShell\\v1.0\\powershell.exe"; Parameters: "-NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\\install_windows.ps1"" -SkipNativeMessaging -ModelsOnly -NoPause -LogPath ""{app}\\install.log"""; StatusMsg: "Phase 3/3: Downloading MangaJaNai models..."; Flags: waituntilterminated runhidden skipifsilent
 Filename: "{app}\\{#MyTrayExe}"; Description: "Start Manga Upscaler Host tray"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
@@ -46,6 +46,7 @@ var
   ExtIdPage: TInputQueryWizardPage;
   DetectedExtensionId: string;
   DefaultExtensionId: string;
+  InstallLogPath: string;
 
 function DetectExtensionId(): string;
 var
@@ -122,6 +123,14 @@ var
   HostPath: string;
   ExtensionId: string;
 begin
+  if CurStep = ssInstall then begin
+    InstallLogPath := ExpandConstant('{app}\install.log');
+    ForceDirectories(ExtractFileDir(InstallLogPath));
+    SaveStringToFile(InstallLogPath,
+      GetDateTimeString('yyyy-mm-dd hh:nn:ss', '-', ':') + ' [InnoSetup] Installer started' + #13#10,
+      True);
+  end;
+
   if CurStep = ssPostInstall then begin
     ExtensionId := DetectedExtensionId;
     if ExtensionId = '' then begin
@@ -142,5 +151,10 @@ begin
       '  "allowed_origins": ["chrome-extension://' + ExtensionId + '/"]' + #13#10 +
       '}' + #13#10;
     SaveStringToFile(ManifestPath, Manifest, False);
+
+    if InstallLogPath <> '' then
+      SaveStringToFile(InstallLogPath,
+        GetDateTimeString('yyyy-mm-dd hh:nn:ss', '-', ':') + ' [InnoSetup] native_messaging_manifest.json written' + #13#10,
+        True);
   end;
 end;
