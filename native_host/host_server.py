@@ -115,7 +115,9 @@ DEFAULT_CFG = {
 
 QUALITY_PROFILES = {
   "fast": {"tile": 0, "tile_pad": 8, "pre_pad": 0, "half": True},
-  "balanced": {"tile": 200, "tile_pad": 10, "pre_pad": 0, "half": True},
+  # Balanced used to tile very aggressively (slow). Prefer no tiling on CUDA and
+  # only fall back to tiling on OOM.
+  "balanced": {"tile": 0, "tile_pad": 10, "pre_pad": 0, "half": True},
   "best": {"tile": 0, "tile_pad": 10, "pre_pad": 0, "half": False}
 }
 
@@ -326,8 +328,34 @@ def _normalize_quality(q: str | None) -> str:
   q = (q or CFG.get("default_quality", "balanced")).strip().lower()
   return q if q in QUALITY_PROFILES else "balanced"
 
-def _normalize_scale(scale: int) -> int:
-  return 2 if scale <= 2 else 4
+def _normalize_outscale(scale: int) -> int:
+  try:
+    scale = int(scale)
+  except Exception:
+    scale = int(CFG.get("default_scale", 2) or 2)
+  return 2 if scale < 2 else 4 if scale > 4 else scale
+
+def _has_manga_scale(scale: int) -> bool:
+  try:
+    mp = CFG.get("model_map_by_type", {}).get("manga", {}).get(str(scale), {})
+    return any(bool(v) for v in (mp or {}).values())
+  except Exception:
+    return False
+
+def _model_scale_for_outscale(outscale: int, model_type: str, quality: str) -> int:
+  # Prefer a native-scale model when possible. For 3x, use 2x Manga models + resize to 3x
+  # for a large speedup vs running 4x and downscaling.
+  if outscale == 2:
+    if model_type == "manga" and _has_manga_scale(2):
+      return 2
+    # Illustration currently ships 4x models only.
+    return 4
+  if outscale == 3:
+    if model_type == "manga" and _has_manga_scale(2):
+      return 2
+    # Illustration currently ships 4x models only.
+    return 4
+  return 4
 
 def _is_dat2_filename(name: str) -> bool:
   return "dat2" in name.lower()
@@ -705,7 +733,7 @@ def _choose_model_type(is_grayscale: bool) -> str:
   has_illu = any(bool(v) for v in illu.values()) or any(bool(v) for v in illu_q.values())
   return "illustration" if has_illu else "manga"
 
-def enhance_bytes(img_bytes: bytes, scale: int, quality: str | None) -> tuple[bytes, str]:
+def enhance_bytes(img_bytes: bytes, outscale: int, quality: str | None) -> tuple[bytes, str]:
   global _engine, _engine_key
   img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
   w, h = img.size
@@ -714,26 +742,49 @@ def enhance_bytes(img_bytes: bytes, scale: int, quality: str | None) -> tuple[by
   is_gray = _detect_grayscale(img)
   model_type = _choose_model_type(is_gray)
   q = _normalize_quality(quality)
+  outscale = _normalize_outscale(outscale)
   model_path = None
   height_key = None
+  model_scale = _model_scale_for_outscale(outscale, model_type, q)
   if model_type == "illustration":
-    model_path = _get_illustration_model_path(scale, q)
+    model_path = _get_illustration_model_path(model_scale, q)
     if not model_path:
       model_type = "manga"
   if not model_path:
-    height_key = _pick_height(h, scale, model_type)
-    model_path = _get_model_path(height_key, scale, model_type)
-  key = f"{model_path}::x{scale}::q={q}"
+    height_key = _pick_height(h, model_scale, model_type)
+    model_path = _get_model_path(height_key, model_scale, model_type)
+  key = f"{model_path}::x{model_scale}::q={q}"
 
   with _engine_lock:
     if _engine is None or _engine_key != key:
-      _engine = _load_engine(model_path, scale, q)
+      _engine = _load_engine(model_path, model_scale, q)
       _engine_key = key
     engine = _engine
 
   import numpy as np
   in_img = np.array(img)[:, :, ::-1]  # RGB -> BGR
-  out, _ = engine.enhance(in_img, outscale=scale)
+  prev_tile = getattr(engine, "tile_size", 0)
+  engine.tile_size = QUALITY_PROFILES.get(q, QUALITY_PROFILES["balanced"]).get("tile", 0) or 0
+  try:
+    out, _ = engine.enhance(in_img, outscale=outscale)
+  except Exception as e:
+    msg = str(e).lower()
+    if "out of memory" in msg or "cuda out of memory" in msg:
+      # Retry once with tiling (common on huge pages).
+      try:
+        _log("CUDA OOM; retrying with tile_size=512")
+        engine.tile_size = 512
+        out, _ = engine.enhance(in_img, outscale=outscale)
+      except Exception:
+        raise
+    else:
+      raise
+  finally:
+    try:
+      engine.tile_size = prev_tile
+    except Exception:
+      pass
+
   out_rgb = out[:, :, ::-1]
   resid_tag = ""
   if _should_apply_residual(model_path):
@@ -742,11 +793,12 @@ def enhance_bytes(img_bytes: bytes, scale: int, quality: str | None) -> tuple[by
   out_img = Image.fromarray(out_rgb)
 
   buf = io.BytesIO()
-  out_img.save(buf, format="PNG", optimize=True)
+  # PNG optimize can be surprisingly slow on large images; favor speed.
+  out_img.save(buf, format="PNG", compress_level=3)
   if height_key:
-    label = f"{model_type}:{height_key}p x{scale} {q}{resid_tag}"
+    label = f"{model_type}:{height_key}p x{outscale} {q}{resid_tag}"
   else:
-    label = f"{model_type}:{q} x{scale}{resid_tag}"
+    label = f"{model_type}:{q} x{outscale}{resid_tag}"
   return buf.getvalue(), label
 
 class Handler(BaseHTTPRequestHandler):
@@ -789,8 +841,8 @@ class Handler(BaseHTTPRequestHandler):
 
       qs = urllib.parse.parse_qs(parsed.query or "")
       url = (qs.get("url") or [""])[0]
-      scale = int((qs.get("scale") or [CFG.get("default_scale", 2)])[0])
-      scale = _normalize_scale(scale)
+      outscale = int((qs.get("scale") or [CFG.get("default_scale", 2)])[0])
+      outscale = _normalize_outscale(outscale)
       quality = (qs.get("quality") or [CFG.get("default_quality", "balanced")])[0]
 
       if not url:
@@ -798,7 +850,7 @@ class Handler(BaseHTTPRequestHandler):
 
       # Simple disk cache keyed by url+scale
       _cleanup_cache_if_needed()
-      cache_key = str(abs(hash(f"v{CACHE_VERSION}::{url}::{scale}::{quality}")))
+      cache_key = str(abs(hash(f"v{CACHE_VERSION}::{url}::{outscale}::{quality}")))
       cache_path = os.path.join(CACHE_DIR, f"{cache_key}.png")
       if os.path.exists(cache_path):
         with open(cache_path, "rb") as f:
@@ -811,7 +863,7 @@ class Handler(BaseHTTPRequestHandler):
 
       # Try enhance, fallback to passthrough if missing deps/models
       try:
-        out_bytes, model_name = enhance_bytes(src_bytes, scale, quality)
+        out_bytes, model_name = enhance_bytes(src_bytes, outscale, quality)
         with open(cache_path, "wb") as f:
           f.write(out_bytes)
         return self._send(200, out_bytes, "image/png", {"X-MU-Model": model_name})
@@ -881,8 +933,8 @@ class Handler(BaseHTTPRequestHandler):
       _touch_enhance()
 
       qs = urllib.parse.parse_qs(parsed.query or "")
-      scale = int((qs.get("scale") or [CFG.get("default_scale", 2)])[0])
-      scale = _normalize_scale(scale)
+      outscale = int((qs.get("scale") or [CFG.get("default_scale", 2)])[0])
+      outscale = _normalize_outscale(outscale)
       quality = (qs.get("quality") or [CFG.get("default_quality", "balanced")])[0]
 
       length = int(self.headers.get("Content-Length", "0"))
@@ -894,14 +946,14 @@ class Handler(BaseHTTPRequestHandler):
 
       # Cache by content hash + scale + quality
       _cleanup_cache_if_needed()
-      h = hashlib.sha1(src_bytes + f"::{scale}::{quality}::v{CACHE_VERSION}".encode("utf-8")).hexdigest()
+      h = hashlib.sha1(src_bytes + f"::{outscale}::{quality}::v{CACHE_VERSION}".encode("utf-8")).hexdigest()
       cache_path = os.path.join(CACHE_DIR, f"{h}.png")
       if os.path.exists(cache_path):
         with open(cache_path, "rb") as f:
           return self._send(200, f.read(), "image/png", {"X-MU-Model":"cache"})
 
       try:
-        out_bytes, model_name = enhance_bytes(src_bytes, scale, quality)
+        out_bytes, model_name = enhance_bytes(src_bytes, outscale, quality)
         with open(cache_path, "wb") as f:
           f.write(out_bytes)
         return self._send(200, out_bytes, "image/png", {"X-MU-Model": model_name})

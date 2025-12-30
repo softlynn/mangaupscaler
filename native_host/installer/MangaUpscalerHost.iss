@@ -14,6 +14,8 @@ PrivilegesRequired=lowest
 OutputBaseFilename=MangaUpscalerHostSetup
 Compression=lzma
 SolidCompression=yes
+WizardImageFile=..\..\extension\icons\mangaupscaler.png
+WizardSmallImageFile=..\..\extension\icons\mangaupscaler.png
 
 [Files]
 Source: "..\\dist\\{#MyTrayExe}"; DestDir: "{app}"; Flags: ignoreversion
@@ -23,6 +25,7 @@ Source: "..\\dist\\host_server.py"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\\dist\\install_windows.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\\dist\\requirements.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\\dist\\host_launcher.bat"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\\dist\\tray_icon.png"; DestDir: "{app}"; Flags: ignoreversion
 
 [Dirs]
 Name: "{app}\\models"
@@ -30,6 +33,10 @@ Name: "{app}\\cache"
 
 [Registry]
 Root: HKCU; Subkey: "Software\\Google\\Chrome\\NativeMessagingHosts\\com.softlynn.manga_upscaler"; ValueType: string; ValueName: ""; ValueData: "{app}\\native_messaging_manifest.json"; Flags: uninsdeletekey
+
+[Tasks]
+Name: tailinstall; Description: "Open live install log during installation (PowerShell)"; Flags: unchecked
+Name: tailhost; Description: "Open live host log during installation (PowerShell)"; Flags: unchecked
 
 [Run]
 Filename: "{sysnative}\\WindowsPowerShell\\v1.0\\powershell.exe"; Parameters: "-NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\\install_windows.ps1"" -SkipNativeMessaging -DepsOnly -NoPause -LogPath ""{app}\\install.log"""; StatusMsg: "Phase 1/3: Installing Python dependencies..."; Flags: waituntilterminated runhidden skipifsilent
@@ -94,26 +101,59 @@ end;
 
 procedure InitializeWizard();
 begin
-  DefaultExtensionId := 'kciacmbepigmndncggbcnlalmeokoknp';
+  DefaultExtensionId := '';
   DetectedExtensionId := DetectExtensionId();
   ExtIdPage := CreateInputQueryPage(
-    wpSelectDir,
+    wpWelcome,
     'Extension ID',
     'Paste your unpacked extension ID',
-    'Leave blank to use default.'
+    'Open chrome://extensions, enable Developer mode, then copy the ID.'
   );
   ExtIdPage.Add('Extension ID:', False);
-  ExtIdPage.Values[0] := DefaultExtensionId;
+  if DetectedExtensionId <> '' then
+    ExtIdPage.Values[0] := DetectedExtensionId
+  else
+    ExtIdPage.Values[0] := '';
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
-  if Assigned(ExtIdPage) and (PageID = ExtIdPage.ID) then begin
-    Result := DetectedExtensionId <> '';
-    if DetectedExtensionId <> '' then
-      ExtIdPage.Values[0] := DetectedExtensionId;
-  end else
-    Result := False;
+  Result := False;
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+  if Assigned(ExtIdPage) and (CurPageID = ExtIdPage.ID) then begin
+    if Trim(ExtIdPage.Values[0]) = '' then begin
+      MsgBox(
+        'Extension ID is required.' + #13#10 + #13#10 +
+        'In Chrome:' + #13#10 +
+        '1) Go to chrome://extensions' + #13#10 +
+        '2) Enable Developer mode' + #13#10 +
+        '3) Load the unpacked Manga Upscaler extension' + #13#10 +
+        '4) Copy the ID and paste it here',
+        mbError, MB_OK
+      );
+      Result := False;
+    end;
+  end;
+end;
+
+procedure StartLogTail(const LogPath, Title: string);
+var
+  PsCmd: string;
+  Args: string;
+  ResultCode: Integer;
+begin
+  PsCmd :=
+    '$p=''' + LogPath + ''';' +
+    'Write-Host ''--- ' + Title + ' ---'';' +
+    'Write-Host ''Tailing: '' $p;' +
+    'while(-not (Test-Path $p)) { Start-Sleep -Milliseconds 250 };' +
+    'Get-Content -Path $p -Wait -Tail 60';
+  Args := '-NoProfile -NoExit -Command "' + PsCmd + '"';
+  Exec('powershell.exe', Args, '', SW_SHOWNORMAL, ewNoWait, ResultCode);
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -122,6 +162,7 @@ var
   Manifest: string;
   HostPath: string;
   ExtensionId: string;
+  HostLogPath: string;
 begin
   if CurStep = ssInstall then begin
     InstallLogPath := ExpandConstant('{app}\install.log');
@@ -129,15 +170,16 @@ begin
     SaveStringToFile(InstallLogPath,
       GetDateTimeString('yyyy-mm-dd hh:nn:ss', '-', ':') + ' [InnoSetup] Installer started' + #13#10,
       True);
+
+    HostLogPath := ExpandConstant('{app}\host.log');
+    if WizardIsTaskSelected('tailinstall') then
+      StartLogTail(InstallLogPath, 'Install log');
+    if WizardIsTaskSelected('tailhost') then
+      StartLogTail(HostLogPath, 'Host log');
   end;
 
   if CurStep = ssPostInstall then begin
-    ExtensionId := DetectedExtensionId;
-    if ExtensionId = '' then begin
-      ExtensionId := Trim(ExtIdPage.Values[0]);
-      if ExtensionId = '' then
-        ExtensionId := DefaultExtensionId;
-    end;
+    ExtensionId := Trim(ExtIdPage.Values[0]);
 
     ManifestPath := ExpandConstant('{app}\native_messaging_manifest.json');
     HostPath := ExpandConstant('{app}\{#MyNativeExe}');

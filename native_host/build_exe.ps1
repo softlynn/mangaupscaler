@@ -28,6 +28,10 @@ Copy-Item (Join-Path $PSScriptRoot "host_server.py") $distPath -Force
 Copy-Item (Join-Path $PSScriptRoot "install_windows.ps1") $distPath -Force
 Copy-Item (Join-Path $PSScriptRoot "requirements.txt") $distPath -Force
 Copy-Item (Join-Path $PSScriptRoot "host_launcher.bat") $distPath -Force
+$trayIconSrc = Join-Path $PSScriptRoot "..\\extension\\icons\\mangaupscaler.png"
+if (Test-Path $trayIconSrc) {
+  Copy-Item $trayIconSrc (Join-Path $distPath "tray_icon.png") -Force
+}
 New-Item -ItemType Directory -Path (Join-Path $distPath "models") -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $distPath "cache") -Force | Out-Null
 

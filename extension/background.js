@@ -38,14 +38,19 @@ const AI_HOST = 'http://127.0.0.1:48159';
 const BADGE_BG = '#ff7fc8';
 const NATIVE_HOST = 'com.softlynn.manga_upscaler';
 
+let hostOkUntil = 0;
+
 async function delay(ms){
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function pingHost(){
+async function pingHost(force=false){
+  if (!force && Date.now() < hostOkUntil) return true;
   try{
     const resp = await fetch(`${AI_HOST}/health`, { cache: 'no-store' });
-    return resp.ok;
+    const ok = resp.ok;
+    if (ok) hostOkUntil = Date.now() + 2000;
+    return ok;
   }catch{
     return false;
   }
@@ -89,6 +94,7 @@ async function stopNativeHost(reason){
   }catch{
     // ignore
   }
+  hostOkUntil = 0;
   return !(await pingHost());
 }
 
@@ -145,6 +151,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       if (msg?.type === 'FETCH_AI_ENHANCE') {
         const { sourceUrl, dataUrl, scale, quality } = msg || {};
+        const t0 = Date.now();
         if (!await ensureHostRunning('enhance')) throw new Error('AI host not running');
         const qs = new URLSearchParams();
         if (typeof scale === 'number') qs.set('scale', String(scale));
@@ -163,8 +170,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const model = resp.headers.get('X-MU-Model') || '';
         const hostError = resp.headers.get('X-MU-Host-Error') || '';
         const blob = await resp.blob();
-        const outUrl = await blobToDataURL(blob);
-        sendResponse({ ok: true, dataUrl: outUrl, model, hostError });
+        const buffer = await blob.arrayBuffer();
+        const contentType = (resp.headers.get('content-type') || blob.type || 'image/png').split(';')[0];
+        const elapsedMs = Date.now() - t0;
+        sendResponse({ ok: true, buffer, contentType, model, hostError, elapsedMs });
         return;
       }
 

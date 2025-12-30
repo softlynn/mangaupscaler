@@ -1,4 +1,4 @@
-// Manga Upscaler content script (v1.4)
+// Manga Upscaler content script (v1.1.0)
 // Enhances the currently visible manga panel (largest visible image) by:
 // 1) fetching the image data safely (via background to avoid CORS taint)
 // 2) upscaling with progressive high-quality resampling
@@ -42,11 +42,29 @@ let busy = false;
 let lastProcessedUrl = null;
 let observerStarted = false;
 let aiHostDownUntil = 0;
+let toastEl = null;
+let toastTimer = null;
+let io = null;
+let visibleScores = new Map(); // Map<img, intersectionArea>
+let lastHostStartAt = 0;
 
 // ---------- Settings ----------
 async function loadSettings() {
   const s = await chrome.storage.sync.get(DEFAULTS);
   settings = { ...DEFAULTS, ...s, whitelist: s.whitelist || {} };
+}
+
+function maybeStartHost(reason){
+  if (!settings.enabled || !settings.aiMode) return;
+  if (!hostAllowed()) return;
+  const now = Date.now();
+  if (now - lastHostStartAt < 8000) return;
+  lastHostStartAt = now;
+  chrome.runtime.sendMessage({ type: 'HOST_START', reason: reason || 'auto' }).catch(()=>{});
+}
+
+function maybeStopHost(reason){
+  chrome.runtime.sendMessage({ type: 'HOST_STOP', reason: reason || 'auto' }).catch(()=>{});
 }
 
 function hostAllowed() {
@@ -69,18 +87,26 @@ function log(...a){ console.log('[MangaUpscaler]', ...a); }
 
 function makeToast(text){
   if (!settings.showToast) return;
-  const el = document.createElement('div');
-  el.textContent = text;
-  el.style.cssText = `
-    position: fixed; left: 18px; bottom: 18px; z-index: 2147483647;
-    background: rgba(20,18,24,.92); color: #fff; border: 1px solid rgba(255,255,255,.18);
-    padding: 10px 12px; border-radius: 14px; font: 12px/1.2 system-ui;
-    box-shadow: 0 16px 40px rgba(0,0,0,.35); backdrop-filter: blur(8px);
-    pointer-events: none;
-  `;
-  (document.body || document.documentElement).appendChild(el);
-  setTimeout(()=>{ el.style.opacity='0'; el.style.transition='opacity .25s ease'; }, 1600);
-  setTimeout(()=>el.remove(), 2000);
+  if (!toastEl) {
+    toastEl = document.createElement('div');
+    toastEl.style.cssText = `
+      position: fixed; left: 18px; bottom: 18px; z-index: 2147483647;
+      background: rgba(20,18,24,.92); color: #fff; border: 1px solid rgba(255,127,200,.35);
+      padding: 10px 12px; border-radius: 14px; font: 12px/1.2 system-ui;
+      box-shadow: 0 16px 40px rgba(0,0,0,.35); backdrop-filter: blur(8px);
+      pointer-events: none; max-width: 72vw;
+    `;
+    (document.body || document.documentElement).appendChild(toastEl);
+  }
+  toastEl.textContent = text;
+  toastEl.style.opacity = '1';
+  toastEl.style.transition = 'none';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(()=>{
+    if (!toastEl) return;
+    toastEl.style.opacity = '0';
+    toastEl.style.transition = 'opacity .28s ease';
+  }, 2600);
 }
 
 function sparkle(rect){
@@ -121,8 +147,65 @@ function sparkle(rect){
   setTimeout(()=>root.remove(), 900);
 }
 
+function showOverlay(rect, text){
+  const root = document.createElement('div');
+  root.style.cssText = `
+    position: fixed;
+    left: ${Math.max(0, rect.left)}px;
+    top: ${Math.max(0, rect.top)}px;
+    width: ${Math.max(0, rect.width)}px;
+    height: ${Math.max(0, rect.height)}px;
+    z-index: 2147483647;
+    pointer-events: none;
+    display: grid;
+    place-items: center;
+  `;
+  root.innerHTML = `
+    <div style="
+      display:flex; align-items:center; gap:10px;
+      background: rgba(20,18,24,.72);
+      color:#fff;
+      border:1px solid rgba(255,255,255,.16);
+      border-radius: 14px;
+      padding: 10px 12px;
+      box-shadow: 0 16px 40px rgba(0,0,0,.35);
+      backdrop-filter: blur(10px);
+      font: 12px/1.2 system-ui;
+    ">
+      <div style="
+        width:14px; height:14px; border-radius: 999px;
+        border: 2px solid rgba(255,255,255,.25);
+        border-top-color: rgba(255,127,200,.95);
+        animation: muSpin .8s linear infinite;
+      "></div>
+      <div>${String(text || 'Enhancing…')}</div>
+    </div>
+    <style>
+      @keyframes muSpin { from { transform: rotate(0deg) } to { transform: rotate(360deg) } }
+    </style>
+  `;
+  (document.body || document.documentElement).appendChild(root);
+  return () => { try { root.remove(); } catch {} };
+}
+
 // Pick the "panel in view": largest visible <img> by viewport intersection area.
 function findBestVisibleImage(){
+  if (visibleScores && visibleScores.size > 0){
+    let best = null;
+    let bestScore = 0;
+    for (const [img, score] of visibleScores){
+      if (!img || !img.isConnected || !img.src) {
+        visibleScores.delete(img);
+        continue;
+      }
+      if (score > bestScore){
+        bestScore = score;
+        best = img;
+      }
+    }
+    if (best) return best;
+  }
+
   const imgs = Array.from(document.images || []);
   const vw = window.innerWidth, vh = window.innerHeight;
   let best = null;
@@ -355,27 +438,37 @@ async function enhanceToDataURL(dataUrl){
 
 async function enhanceViaHost(srcUrl){
   if (!srcUrl) throw new Error('Missing image url');
-  const rawScale = clamp(Number(settings.scale || 3), 2, 4);
-  const scale = rawScale <= 2 ? 2 : 4;
+  const scale = clamp(Number(settings.scale || 3), 2, 4);
   const quality = String(settings.aiQuality || 'balanced');
   if (Date.now() < aiHostDownUntil) throw new Error('AI host cooldown');
 
+  maybeStartHost('enhance');
+
+  // If the host is cold-starting or loading a model, the first request can take a while.
+  let slowHintTimer = setTimeout(()=>{
+    makeToast('AI working… (first run may take longer)');
+  }, 1200);
+
   let resp;
-  if (srcUrl.startsWith('data:') || srcUrl.startsWith('blob:')) {
-    const dataUrl = await fetchImageAsDataURL(srcUrl);
-    resp = await chrome.runtime.sendMessage({
-      type: 'FETCH_AI_ENHANCE',
-      dataUrl,
-      scale,
-      quality
-    });
-  } else {
-    resp = await chrome.runtime.sendMessage({
-      type: 'FETCH_AI_ENHANCE',
-      sourceUrl: srcUrl,
-      scale,
-      quality
-    });
+  try{
+    if (srcUrl.startsWith('data:') || srcUrl.startsWith('blob:')) {
+      const dataUrl = await fetchImageAsDataURL(srcUrl);
+      resp = await chrome.runtime.sendMessage({
+        type: 'FETCH_AI_ENHANCE',
+        dataUrl,
+        scale,
+        quality
+      });
+    } else {
+      resp = await chrome.runtime.sendMessage({
+        type: 'FETCH_AI_ENHANCE',
+        sourceUrl: srcUrl,
+        scale,
+        quality
+      });
+    }
+  } finally {
+    clearTimeout(slowHintTimer);
   }
 
   if (!resp?.ok) {
@@ -385,11 +478,16 @@ async function enhanceViaHost(srcUrl){
   if (resp.hostError) {
     throw new Error(resp.hostError);
   }
-  return { dataUrl: resp.dataUrl, model: resp.model || '' };
+  if (resp.buffer) {
+    const blob = new Blob([resp.buffer], { type: resp.contentType || 'image/png' });
+    const objectUrl = URL.createObjectURL(blob);
+    return { src: objectUrl, isObjectUrl: true, model: resp.model || '', elapsedMs: resp.elapsedMs || 0 };
+  }
+  return { src: resp.dataUrl, isObjectUrl: false, model: resp.model || '', elapsedMs: resp.elapsedMs || 0 };
 }
 
 // ---------- Replace in page ----------
-function replaceImgSrc(imgEl, dataUrl){
+function replaceImgSrc(imgEl, newSrc, isObjectUrl=false){
   const rect = imgEl.getBoundingClientRect();
   const hasSizing = !!(imgEl.style.width || imgEl.style.height || imgEl.getAttribute('width') || imgEl.getAttribute('height'));
   if (!imgEl.dataset.muStyleWidth) {
@@ -404,7 +502,18 @@ function replaceImgSrc(imgEl, dataUrl){
     imgEl.style.objectFit = 'contain';
   }
   imgEl.dataset.muOriginalSrc = imgEl.dataset.muOriginalSrc || imgEl.src;
-  imgEl.src = dataUrl;
+
+  const prevObjectUrl = imgEl.dataset.muObjectUrl || '';
+  if (prevObjectUrl && prevObjectUrl !== newSrc) {
+    try { URL.revokeObjectURL(prevObjectUrl); } catch {}
+  }
+  if (isObjectUrl) {
+    imgEl.dataset.muObjectUrl = newSrc;
+  } else {
+    delete imgEl.dataset.muObjectUrl;
+  }
+
+  imgEl.src = newSrc;
   imgEl.style.imageRendering = 'auto';
 }
 
@@ -431,21 +540,30 @@ async function processImageElement(imgEl){
   if (imgEl.dataset.muUpscaled === '1') return;
 
   const rect = imgEl.getBoundingClientRect();
-  sparkle(rect);
+  let removeOverlay = null;
+  let overlayTimer = setTimeout(()=>{
+    removeOverlay = showOverlay(rect, settings.aiMode ? 'AI enhancing…' : 'Enhancing…');
+  }, 650);
 
   let out;
   let model = '';
+  let outIsObjectUrl = false;
   if (settings.aiMode) {
     const ai = await enhanceViaHost(src);
-    out = ai.dataUrl;
+    out = ai.src;
     model = ai.model;
+    outIsObjectUrl = !!ai.isObjectUrl;
   } else {
     const data = await fetchImageAsDataURL(src);
     out = await enhanceToDataURL(data);
   }
 
-  replaceImgSrc(imgEl, out);
+  clearTimeout(overlayTimer);
+  if (removeOverlay) removeOverlay();
+
+  replaceImgSrc(imgEl, out, outIsObjectUrl);
   imgEl.dataset.muUpscaled = '1';
+  sparkle(imgEl.getBoundingClientRect());
 
   chrome.runtime.sendMessage({ type: 'BADGE_UP' }).catch(()=>{});
   if (settings.aiMode) {
@@ -500,8 +618,9 @@ function startAuto(){
   observerStarted = true;
 
   const onTick = () => {
+    if (busy) return;
     if (!settings.enabled || !settings.autoPanel || !hostAllowed()) return;
-    // Don’t spam: only run if current visible image not yet processed
+    // Don't spam: only run if current visible image not yet processed
     const img = findBestVisibleImage();
     if (!img) return;
     if (img.dataset.muUpscaled === '1') return;
@@ -512,15 +631,55 @@ function startAuto(){
   let t = null;
   const schedule = () => {
     clearTimeout(t);
-    t = setTimeout(onTick, 220);
+    t = setTimeout(onTick, 260);
   };
 
   window.addEventListener('scroll', schedule, { passive: true });
   window.addEventListener('resize', schedule);
 
-  // DOM changes (lazy-loaded pages)
-  const mo = new MutationObserver(schedule);
-  mo.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
+  // Prefer IntersectionObserver for smooth scrolling (avoids scanning every image on every tick).
+  try{
+    io = new IntersectionObserver((entries)=>{
+      for (const e of entries){
+        const img = e.target;
+        if (!img || !img.src || !e.isIntersecting) {
+          visibleScores.delete(img);
+          continue;
+        }
+        const r = e.intersectionRect;
+        if (!r || r.width < 80 || r.height < 80) {
+          visibleScores.delete(img);
+          continue;
+        }
+        visibleScores.set(img, r.width * r.height);
+      }
+      schedule();
+    }, { threshold: [0, 0.15, 0.35, 0.65, 0.9] });
+
+    for (const img of Array.from(document.images || [])){
+      if (img && img.tagName === 'IMG') io.observe(img);
+    }
+  } catch {
+    // ignore
+  }
+
+  // DOM changes (lazy-loaded pages): observe new <img> elements.
+  const mo = new MutationObserver((muts)=>{
+    for (const m of muts){
+      for (const n of Array.from(m.addedNodes || [])){
+        if (!n) continue;
+        if (n.tagName === 'IMG') {
+          try { io && io.observe(n); } catch {}
+        } else if (n.querySelectorAll) {
+          for (const img of Array.from(n.querySelectorAll('img'))){
+            try { io && io.observe(img); } catch {}
+          }
+        }
+      }
+    }
+    schedule();
+  });
+  mo.observe(document.documentElement, { childList: true, subtree: true });
 
   schedule();
 }
@@ -528,10 +687,22 @@ function startAuto(){
 // ---------- Messaging ----------
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.type === 'SETTINGS_UPDATED') {
-    loadSettings().then(()=>{ /* re-eval */ }).catch(()=>{});
+    loadSettings().then(()=>{
+      if (!settings.enabled || !hostAllowed() || !settings.aiMode) {
+        maybeStopHost('settings_update');
+      } else {
+        maybeStartHost('settings_update');
+      }
+    }).catch(()=>{});
   }
   if (msg?.type === 'RUN_ONCE') {
     processOnce(!!msg.preload, true);
+  }
+  if (msg?.type === 'HOST_START') {
+    maybeStartHost(msg.reason || 'popup');
+  }
+  if (msg?.type === 'HOST_STOP') {
+    maybeStopHost(msg.reason || 'popup');
   }
 });
 
@@ -540,6 +711,10 @@ chrome.runtime.onMessage.addListener((msg) => {
   await loadSettings();
 
   if (!hostAllowed()) return; // no work on non-whitelisted sites
+
+  if (settings.aiMode && settings.enabled) {
+    maybeStartHost('init');
+  }
 
   startAuto();
   log('Ready', { host: location.hostname, enabled: settings.enabled });
