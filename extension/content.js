@@ -466,7 +466,12 @@ async function processOnce(preload){
     }
   } catch(e){
     log('Enhance failed:', e);
-    makeToast('Upscale failed');
+    const msg = String(e?.message || e || '').slice(0, 120);
+    if (settings.aiMode && msg) {
+      makeToast(`AI failed: ${msg}`);
+    } else {
+      makeToast('Upscale failed');
+    }
   } finally {
     busy = false;
   }

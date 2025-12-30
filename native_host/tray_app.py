@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
+import json
 import os
 import subprocess
 import sys
@@ -22,6 +23,8 @@ HEALTH_URL = f"http://{HOST}:{PORT}/health"
 SHUTDOWN_URL = f"http://{HOST}:{PORT}/shutdown"
 MODELS_DIR = os.path.join(ROOT, "models")
 CACHE_DIR = os.path.join(ROOT, "cache")
+CONFIG_PATH = os.path.join(ROOT, "config.json")
+LOG_PATH = os.path.join(ROOT, "host.log")
 
 
 def _find_pythonw() -> str:
@@ -40,7 +43,7 @@ def _find_pythonw() -> str:
   return "python"
 
 
-def _launch_host():
+def _launch_host(log_file):
   script = os.path.join(ROOT, "host_server.py")
   if not os.path.exists(script):
     return None
@@ -50,8 +53,8 @@ def _launch_host():
       [_find_pythonw(), script],
       cwd=ROOT,
       stdin=subprocess.DEVNULL,
-      stdout=subprocess.DEVNULL,
-      stderr=subprocess.DEVNULL,
+      stdout=log_file or subprocess.DEVNULL,
+      stderr=log_file or subprocess.DEVNULL,
       creationflags=creationflags
     )
   except Exception:
@@ -69,6 +72,7 @@ def _ping_host() -> bool:
 class HostController:
   def __init__(self):
     self.proc = None
+    self.log_file = None
 
   def is_running(self) -> bool:
     return _ping_host()
@@ -76,7 +80,11 @@ class HostController:
   def start(self):
     if self.is_running():
       return
-    self.proc = _launch_host()
+    try:
+      self.log_file = open(LOG_PATH, "a", encoding="utf-8")
+    except Exception:
+      self.log_file = None
+    self.proc = _launch_host(self.log_file)
 
   def stop(self):
     try:
@@ -92,6 +100,12 @@ class HostController:
         except Exception:
           pass
       self.proc = None
+    if self.log_file:
+      try:
+        self.log_file.close()
+      except Exception:
+        pass
+      self.log_file = None
 
   def clear_cache(self):
     if not os.path.isdir(CACHE_DIR):
@@ -133,6 +147,21 @@ def _open_folder(path: str):
   except Exception:
     pass
 
+def _open_file(path: str):
+  try:
+    if os.path.exists(path):
+      os.startfile(path)
+  except Exception:
+    pass
+
+def _load_config_allow_dat2() -> bool:
+  try:
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+      cfg = json.load(f)
+    return bool(cfg.get("allow_dat2", False))
+  except Exception:
+    return False
+
 
 def _on_start(icon, item, ctl: HostController):
   ctl.start()
@@ -150,12 +179,36 @@ def _on_open_models(icon, item):
   _open_folder(MODELS_DIR)
 
 
+def _on_open_settings(icon, item):
+  _open_file(CONFIG_PATH)
+
+
+def _on_open_log(icon, item):
+  _open_file(LOG_PATH)
+
+
 def _on_open_config(icon, item):
   _open_folder(ROOT)
 
 
 def _on_clear_cache(icon, item, ctl: HostController):
   ctl.clear_cache()
+
+
+def _on_download_models(icon, item, ctl: HostController):
+  ctl.start()
+  try:
+    allow_dat2 = _load_config_allow_dat2()
+    payload = json.dumps({"allow_dat2": allow_dat2}).encode("utf-8")
+    req = urllib.request.Request(
+      f"http://{HOST}:{PORT}/models/download",
+      data=payload,
+      headers={"Content-Type": "application/json"},
+      method="POST"
+    )
+    urllib.request.urlopen(req, timeout=30)
+  except Exception:
+    pass
 
 
 def _on_quit(icon, item, ctl: HostController):
@@ -180,8 +233,11 @@ def main():
     pystray.Menu.SEPARATOR,
     pystray.MenuItem("Open cache folder", _on_open_cache),
     pystray.MenuItem("Open models folder", _on_open_models),
+    pystray.MenuItem("Open settings (config.json)", _on_open_settings),
+    pystray.MenuItem("Open host log", _on_open_log),
     pystray.MenuItem("Open host folder", _on_open_config),
     pystray.MenuItem("Clear cache", lambda icon, item: _on_clear_cache(icon, item, ctl)),
+    pystray.MenuItem("Download models", lambda icon, item: _on_download_models(icon, item, ctl)),
     pystray.Menu.SEPARATOR,
     pystray.MenuItem("Quit", lambda icon, item: _on_quit(icon, item, ctl))
   )

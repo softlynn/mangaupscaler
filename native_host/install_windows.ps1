@@ -5,11 +5,33 @@ param(
   [switch]$AllowDat2,
   [switch]$SkipModelDownload,
   [switch]$SkipNativeMessaging,
-  [string]$CudaIndexUrl = "https://download.pytorch.org/whl/cu121"
+  [switch]$NoPause,
+  [string]$CudaIndexUrl = "https://download.pytorch.org/whl/cu121",
+  [string]$LogPath = ""
 )
 
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
+
+function Write-Log {
+  param([string]$Message)
+  if (-not $LogPath) { return }
+  try {
+    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Add-Content -Path $LogPath -Value "[$ts] $Message"
+  } catch {
+    # ignore log errors
+  }
+}
+
+function Resolve-Exec {
+  param([string]$Name)
+  try {
+    return (Get-Command $Name -ErrorAction Stop).Source
+  } catch {
+    return $null
+  }
+}
 
 function Resolve-PathString {
   param([string]$Path)
@@ -64,15 +86,36 @@ function Find-ExtensionId {
   return $byName
 }
 
+if ($LogPath) {
+  try { New-Item -ItemType File -Path $LogPath -Force | Out-Null } catch { }
+}
+
+$pyLauncher = Resolve-Exec -Name "py"
+$pythonExe = Resolve-Exec -Name "python"
+if (-not $pyLauncher -and -not $pythonExe) {
+  Write-Host "Python not found. Install Python 3.10+ and rerun this installer."
+  Write-Log "Python not found in PATH."
+  exit 1
+}
+
 if (-not (Test-Path ".venv")) {
-  py -3.10 -m venv .venv
+  $venvCmd = "python"
+  $venvArgs = @()
+  if ($pyLauncher) {
+    $venvCmd = "py"
+    $venvArgs = @("-3.10")
+  }
+  Write-Log "Creating venv via $venvCmd $($venvArgs -join ' ')"
+  & $venvCmd @venvArgs -m venv .venv
 }
 
 . .\.venv\Scripts\Activate.ps1
+Write-Log "Installing Python dependencies."
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 
 # CUDA Torch build (adjust CudaIndexUrl if needed)
+Write-Log "Installing Torch from $CudaIndexUrl"
 python -m pip install --force-reinstall --index-url $CudaIndexUrl torch torchvision torchaudio
 python -m pip install numpy==2.2.6
 
@@ -115,6 +158,7 @@ if (-not $SkipNativeMessaging) {
 
 # Optional model download (official MangaJaNai release)
 if (-not $SkipModelDownload) {
+  Write-Log "Downloading MangaJaNai models."
   $dlArgs = @("host_server.py", "--download-models")
   if ($AllowDat2) { $dlArgs += "--allow-dat2" }
   python @dlArgs
@@ -125,4 +169,6 @@ Write-Host "Install complete."
 Write-Host "Tray host: .\\run_host.bat (no console)"
 Write-Host "Console host: .\\run_host.bat --console"
 Write-Host "If Chrome is open, reload the extension."
-pause
+if (-not $NoPause) {
+  pause
+}

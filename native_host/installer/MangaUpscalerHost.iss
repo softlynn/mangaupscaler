@@ -10,6 +10,7 @@ AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 DefaultDirName={userappdata}\MangaUpscalerHost
 DisableProgramGroupPage=yes
+PrivilegesRequired=lowest
 OutputBaseFilename=MangaUpscalerHostSetup
 Compression=lzma
 SolidCompression=yes
@@ -31,8 +32,12 @@ Name: "{app}\\cache"
 Root: HKCU; Subkey: "Software\\Google\\Chrome\\NativeMessagingHosts\\com.softlynn.manga_upscaler"; ValueType: string; ValueName: ""; ValueData: "{app}\\native_messaging_manifest.json"; Flags: uninsdeletekey
 
 [Run]
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\\install_windows.ps1"" -SkipNativeMessaging"; Flags: waituntilterminated postinstall skipifsilent
+Filename: "powershell.exe"; Parameters: "-NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\\install_windows.ps1"" -SkipNativeMessaging -NoPause -LogPath ""{app}\\install.log"""; Flags: waituntilterminated runhidden skipifsilent
 Filename: "{app}\\{#MyTrayExe}"; Description: "Start Manga Upscaler Host tray"; Flags: nowait postinstall skipifsilent
+
+[UninstallRun]
+Filename: "{cmd}"; Parameters: "/c taskkill /IM {#MyTrayExe} /T /F"; Flags: runhidden; RunOnceId: "KillTray"
+Filename: "{cmd}"; Parameters: "/c taskkill /IM {#MyNativeExe} /T /F"; Flags: runhidden; RunOnceId: "KillNative"
 
 [Code]
 var

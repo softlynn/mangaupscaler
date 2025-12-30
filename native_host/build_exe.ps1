@@ -13,6 +13,7 @@ if (-not (Test-Path ".venv")) {
 . .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install pyinstaller
+python -m pip install pystray pillow
 
 $distPath = Join-Path $PSScriptRoot $DistDir
 

@@ -63,6 +63,7 @@ CACHE_CLEANUP_INTERVAL_SEC = 120
 os.makedirs(CACHE_DIR, exist_ok=True)
 WRAPPED_DIR = os.path.join(CACHE_DIR, "wrapped_models")
 os.makedirs(WRAPPED_DIR, exist_ok=True)
+LOG_PATH = os.path.join(ROOT, "host.log")
 
 DEFAULT_CFG = {
   "auto_scan_models": True,
@@ -228,6 +229,14 @@ def save_cfg(cfg: dict) -> None:
     json.dump(cfg, f, indent=2)
 
 CFG = load_cfg()
+
+def _log(msg: str) -> None:
+  try:
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    with open(LOG_PATH, "a", encoding="utf-8") as f:
+      f.write(f"[{ts}] {msg}\n")
+  except Exception:
+    pass
 
 # Lazy-loaded model (kept in memory)
 _engine = None
@@ -786,11 +795,13 @@ class Handler(BaseHTTPRequestHandler):
       except Exception as e:
         # passthrough original image
         err = (str(e) or e.__class__.__name__).encode("utf-8", "ignore")[:400]
+        _log(f"enhance failed (GET): {err.decode('utf-8','ignore')}")
         ctype = r.headers.get("content-type","application/octet-stream").split(";")[0]
         return self._send(200, src_bytes, ctype, {"X-MU-Host-Error": err.decode("utf-8","ignore")})
 
     except Exception as e:
       tb = traceback.format_exc()
+      _log(tb)
       self._send(500, tb.encode("utf-8","ignore")[:8000])
 
   def do_POST(self):
@@ -873,9 +884,11 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(200, out_bytes, "image/png", {"X-MU-Model": model_name})
       except Exception as e:
         err = (str(e) or e.__class__.__name__).encode("utf-8", "ignore")[:400]
+        _log(f"enhance failed (POST): {err.decode('utf-8','ignore')}")
         return self._send(200, src_bytes, "application/octet-stream", {"X-MU-Host-Error": err.decode("utf-8","ignore")})
     except Exception:
       tb = traceback.format_exc()
+      _log(tb)
       self._send(500, tb.encode("utf-8","ignore")[:8000])
 
 def create_httpd():
