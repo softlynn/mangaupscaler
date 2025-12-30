@@ -114,6 +114,7 @@ async function readUIIntoSettings(){
   const s = await loadSettings();
   s.enabled = getToggle($('enabled'));
   s.autoPanel = getToggle($('autoPanel'));
+  s.showToast = getToggle($('showToast'));
   s.aiMode = getToggle($('aiMode'));
   s.allowDat2 = getToggle($('allowDat2'));
   s.aiQuality = String($('aiQuality')?.value || s.aiQuality || 'balanced');
@@ -183,6 +184,7 @@ async function init(){
 
   setToggle($('enabled'), s.enabled);
   setToggle($('autoPanel'), s.autoPanel);
+  setToggle($('showToast'), s.showToast);
   setToggle($('aiMode'), s.aiMode);
   setToggle($('allowDat2'), s.allowDat2);
   $('aiQuality').value = String(s.aiQuality || 'balanced');
@@ -206,7 +208,7 @@ async function init(){
   });
 
   // toggle blocks
-  ['enabled','autoPanel','aiMode','allowDat2'].forEach(id=>{
+  ['enabled','autoPanel','showToast','aiMode','allowDat2'].forEach(id=>{
     $(id).addEventListener('click', ()=>$(id).classList.toggle('on'));
   });
 

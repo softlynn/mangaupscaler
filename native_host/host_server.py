@@ -484,6 +484,7 @@ def _load_engine(model_path: str, scale: int, quality: str):
   # Import heavy deps only when needed
   _ensure_torchvision_compat()
   import numpy as np
+  import torch
   from basicsr.archs.rrdbnet_arch import RRDBNet
   from realesrgan import RealESRGANer
 
@@ -496,6 +497,8 @@ def _load_engine(model_path: str, scale: int, quality: str):
 
   prof = QUALITY_PROFILES.get(_normalize_quality(quality), QUALITY_PROFILES["balanced"])
   half = bool(CFG.get("use_fp16", True)) if prof["half"] else False
+  device = "cuda" if torch.cuda.is_available() else "cpu"
+  _log(f"Loading model {os.path.basename(model_path)} x{scale} {quality} device={device} fp16={half} tile={prof['tile']}")
   engine = RealESRGANer(
     scale=scale,
     model_path=model_path,
@@ -757,14 +760,21 @@ class Handler(BaseHTTPRequestHandler):
       pass
 
   def _send(self, code: int, body: bytes, ctype: str="text/plain", extra_headers: dict|None=None):
-    self.send_response(code)
-    self.send_header("Content-Type", ctype)
-    self.send_header("Cache-Control", "no-store")
-    if extra_headers:
-      for k,v in extra_headers.items():
-        self.send_header(k, v)
-    self.end_headers()
-    self.wfile.write(body)
+    try:
+      self.send_response(code)
+      self.send_header("Content-Type", ctype)
+      self.send_header("Cache-Control", "no-store")
+      if extra_headers:
+        for k,v in extra_headers.items():
+          self.send_header(k, v)
+      self.end_headers()
+      self.wfile.write(body)
+    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+      return
+    except OSError as e:
+      if getattr(e, "winerror", None) in (10053, 10054) or e.errno in (32, 104):
+        return
+      raise
 
   def do_GET(self):
     try:
