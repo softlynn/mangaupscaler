@@ -256,6 +256,20 @@ async function init(){
     await chrome.runtime.sendMessage({ type:'HOST_DOWNLOAD_MODELS', allowDat2 }).catch(()=>{});
     btn.textContent = 'Download';
   });
+
+  $('startTray').addEventListener('click', async ()=>{
+    const btn = $('startTray');
+    btn.textContent = 'Starting...';
+    await chrome.runtime.sendMessage({ type:'TRAY_START' }).catch(()=>{});
+    btn.textContent = 'Start tray';
+  });
+
+  $('stopTray').addEventListener('click', async ()=>{
+    const btn = $('stopTray');
+    btn.textContent = 'Stopping...';
+    await chrome.runtime.sendMessage({ type:'TRAY_STOP' }).catch(()=>{});
+    btn.textContent = 'Stop tray';
+  });
 }
 
 init().catch(console.error);

@@ -16,6 +16,9 @@ def _get_root_dir() -> str:
 ROOT = _get_root_dir()
 HEALTH_URL = "http://127.0.0.1:48159/health"
 SHUTDOWN_URL = "http://127.0.0.1:48159/shutdown"
+TRAY_EXE = "MangaUpscalerHost.exe"
+PID_PATH = os.path.join(ROOT, "tray.pid")
+_tray_proc = None
 
 
 def _read_message():
@@ -62,7 +65,7 @@ def _find_pythonw() -> str:
 
 def _find_tray_exe() -> str | None:
   candidates = [
-    os.path.join(ROOT, "MangaUpscalerHost.exe"),
+    os.path.join(ROOT, TRAY_EXE),
     os.path.join(ROOT, "MangaUpscalerTray.exe")
   ]
   for path in candidates:
@@ -85,7 +88,8 @@ def _launch_tray() -> bool:
   if os.name == "nt":
     creationflags = 0x08000000  # CREATE_NO_WINDOW
   try:
-    subprocess.Popen(
+    global _tray_proc
+    _tray_proc = subprocess.Popen(
       cmd,
       cwd=ROOT,
       stdin=subprocess.DEVNULL,
@@ -96,6 +100,31 @@ def _launch_tray() -> bool:
     return True
   except Exception:
     return False
+
+def _stop_tray() -> bool:
+  stopped = False
+  try:
+    if _tray_proc and _tray_proc.poll() is None:
+      _tray_proc.terminate()
+      stopped = True
+  except Exception:
+    pass
+  try:
+    if os.path.exists(PID_PATH):
+      with open(PID_PATH, "r", encoding="utf-8") as f:
+        pid = int(f.read().strip() or "0")
+      if pid > 0:
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        stopped = True
+  except Exception:
+    pass
+  if os.name == "nt":
+    try:
+      subprocess.run(["taskkill", "/IM", TRAY_EXE, "/T", "/F"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+      stopped = True
+    except Exception:
+      pass
+  return stopped
 
 
 def _start_host() -> dict:
@@ -126,6 +155,10 @@ def _handle(msg: dict) -> dict:
     return _start_host()
   if cmd == "stop":
     return _stop_host()
+  if cmd == "tray_start":
+    return {"ok": _launch_tray()}
+  if cmd == "tray_stop":
+    return {"ok": _stop_tray()}
   if cmd == "status":
     return {"ok": True, "running": _ping_host()}
   return {"ok": False, "error": "Unknown command"}

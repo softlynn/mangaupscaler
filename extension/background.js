@@ -60,6 +60,24 @@ async function startNativeHost(reason){
   }
 }
 
+async function startTray(){
+  try{
+    const resp = await chrome.runtime.sendNativeMessage(NATIVE_HOST, { cmd: 'tray_start' });
+    return !!resp?.ok;
+  }catch{
+    return false;
+  }
+}
+
+async function stopTray(){
+  try{
+    const resp = await chrome.runtime.sendNativeMessage(NATIVE_HOST, { cmd: 'tray_stop' });
+    return !!resp?.ok;
+  }catch{
+    return false;
+  }
+}
+
 async function stopNativeHost(reason){
   try{
     await chrome.runtime.sendNativeMessage(NATIVE_HOST, { cmd: 'stop', reason });
@@ -108,6 +126,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       if (msg?.type === 'HOST_STOP') {
         const ok = await stopNativeHost(msg?.reason || 'manual');
+        sendResponse({ ok });
+        return;
+      }
+
+      if (msg?.type === 'TRAY_START') {
+        const ok = await startTray();
+        sendResponse({ ok });
+        return;
+      }
+
+      if (msg?.type === 'TRAY_STOP') {
+        await stopNativeHost(msg?.reason || 'tray_stop');
+        const ok = await stopTray();
         sendResponse({ ok });
         return;
       }

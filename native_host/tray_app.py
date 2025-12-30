@@ -25,6 +25,7 @@ MODELS_DIR = os.path.join(ROOT, "models")
 CACHE_DIR = os.path.join(ROOT, "cache")
 CONFIG_PATH = os.path.join(ROOT, "config.json")
 LOG_PATH = os.path.join(ROOT, "host.log")
+PID_PATH = os.path.join(ROOT, "tray.pid")
 
 
 def _find_pythonw() -> str:
@@ -162,6 +163,20 @@ def _load_config_allow_dat2() -> bool:
   except Exception:
     return False
 
+def _write_pid():
+  try:
+    with open(PID_PATH, "w", encoding="utf-8") as f:
+      f.write(str(os.getpid()))
+  except Exception:
+    pass
+
+def _remove_pid():
+  try:
+    if os.path.exists(PID_PATH):
+      os.remove(PID_PATH)
+  except Exception:
+    pass
+
 
 def _on_start(icon, item, ctl: HostController):
   ctl.start()
@@ -213,6 +228,7 @@ def _on_download_models(icon, item, ctl: HostController):
 
 def _on_quit(icon, item, ctl: HostController):
   ctl.stop()
+  _remove_pid()
   icon.stop()
 
 
@@ -224,6 +240,7 @@ def _status_loop(icon, ctl: HostController):
 
 
 def main():
+  _write_pid()
   ctl = HostController()
   ctl.start()
 

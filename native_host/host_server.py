@@ -499,6 +499,8 @@ def _load_engine(model_path: str, scale: int, quality: str):
   half = bool(CFG.get("use_fp16", True)) if prof["half"] else False
   device = "cuda" if torch.cuda.is_available() else "cpu"
   _log(f"Loading model {os.path.basename(model_path)} x{scale} {quality} device={device} fp16={half} tile={prof['tile']}")
+  if device == "cpu":
+    _log("CUDA not available; using CPU (slow). Reinstall Torch with CUDA in the host .venv.")
   engine = RealESRGANer(
     scale=scale,
     model_path=model_path,
