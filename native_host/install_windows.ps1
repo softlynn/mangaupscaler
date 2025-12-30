@@ -150,7 +150,23 @@ function New-Venv {
   return $false
 }
 
-if (-not (Test-Path ".venv")) {
+$venvPython = Join-Path $PSScriptRoot ".venv\\Scripts\\python.exe"
+$needsVenv = $true
+if (Test-Path $venvPython) {
+  try {
+    $ver = & $venvPython -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null
+  } catch {
+    $ver = ""
+  }
+  if ($ver -eq "3.10" -or $ver -eq "3.11") {
+    $needsVenv = $false
+  } else {
+    Write-Log "Existing venv uses Python $ver; recreating with 3.10/3.11."
+    try { Remove-Item (Join-Path $PSScriptRoot ".venv") -Recurse -Force } catch { }
+  }
+}
+
+if ($needsVenv) {
   $created = $false
   if ($pyLauncher) {
     $created = New-Venv -Command "py" -Args @("-3.10")
@@ -167,7 +183,6 @@ if (-not (Test-Path ".venv")) {
   }
 }
 
-$venvPython = Join-Path $PSScriptRoot ".venv\\Scripts\\python.exe"
 if (-not (Test-Path $venvPython)) {
   Write-Host "Venv python not found. See install.log for details."
   Write-Log "Venv python missing at $venvPython"
