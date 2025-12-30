@@ -43,6 +43,29 @@ function Resolve-PathString {
   }
 }
 
+function Get-GpuComputeCapability {
+  $nvidiaSmi = Resolve-Exec -Name "nvidia-smi"
+  if (-not $nvidiaSmi) { return $null }
+  try {
+    $raw = & $nvidiaSmi --query-gpu=compute_cap --format=csv,noheader 2>$null
+  } catch {
+    return $null
+  }
+  if ($LASTEXITCODE -ne 0 -or -not $raw) { return $null }
+  $caps = @()
+  foreach ($line in ($raw -split "`r?`n")) {
+    $trim = $line.Trim()
+    if (-not $trim) { continue }
+    try {
+      $caps += [double]::Parse($trim, [System.Globalization.CultureInfo]::InvariantCulture)
+    } catch {
+      continue
+    }
+  }
+  if ($caps.Count -eq 0) { return $null }
+  return ($caps | Measure-Object -Maximum).Maximum
+}
+
 function Find-ExtensionId {
   param(
     [string]$ExtensionPath,
@@ -201,13 +224,29 @@ if (-not (Test-Path $venvPython)) {
 }
 Write-Log "Using venv python: $venvPython"
 
+Write-Host "Installing Python dependencies... (this can take several minutes)"
 Write-Log "Installing Python dependencies."
 Invoke-Logged -Label "pip upgrade" -Command $venvPython -CmdArgs @("-m","pip","install","--disable-pip-version-check","--upgrade","pip")
 Invoke-Logged -Label "pip requirements" -Command $venvPython -CmdArgs @("-m","pip","install","--disable-pip-version-check","-r","requirements.txt")
 
 # CUDA Torch build (adjust CudaIndexUrl if needed)
-Write-Log "Installing Torch from $CudaIndexUrl"
-Invoke-Logged -Label "pip torch cuda" -Command $venvPython -CmdArgs @("-m","pip","install","--disable-pip-version-check","--force-reinstall","--index-url",$CudaIndexUrl,"torch","torchvision","torchaudio")
+Write-Host "Installing PyTorch (CUDA)... (this can take several minutes)"
+$torchIndexUrl = $CudaIndexUrl
+$torchPre = $false
+if (-not $PSBoundParameters.ContainsKey("CudaIndexUrl")) {
+  $cap = Get-GpuComputeCapability
+  if ($cap -ge 12.0) {
+    $torchIndexUrl = "https://download.pytorch.org/whl/nightly/cu124"
+    $torchPre = $true
+    $msg = "Detected GPU compute capability $cap; using nightly CUDA 12.4 build."
+    Write-Host $msg
+    Write-Log $msg
+  }
+}
+Write-Log "Installing Torch from $torchIndexUrl"
+$torchArgs = @("-m","pip","install","--disable-pip-version-check","--force-reinstall","--index-url",$torchIndexUrl,"torch","torchvision","torchaudio")
+if ($torchPre) { $torchArgs = @("-m","pip","install","--disable-pip-version-check","--force-reinstall","--pre","--index-url",$torchIndexUrl,"torch","torchvision","torchaudio") }
+Invoke-Logged -Label "pip torch cuda" -Command $venvPython -CmdArgs $torchArgs
 Invoke-Logged -Label "pip numpy" -Command $venvPython -CmdArgs @("-m","pip","install","--disable-pip-version-check","numpy==2.2.6")
 
 if (-not $SkipNativeMessaging) {
@@ -249,6 +288,7 @@ if (-not $SkipNativeMessaging) {
 
 # Optional model download (official MangaJaNai release)
 if (-not $SkipModelDownload) {
+  Write-Host "Downloading MangaJaNai models... (this can take a while)"
   Write-Log "Downloading MangaJaNai models."
   $dlArgs = @("host_server.py", "--download-models")
   if ($AllowDat2) { $dlArgs += "--allow-dat2" }
