@@ -4,6 +4,7 @@
 param(
   [switch]$AllowDat2,
   [switch]$SkipModelDownload,
+  [switch]$ModelsOnly,
   [switch]$SkipNativeMessaging,
   [switch]$NoPause,
   [string]$CudaIndexUrl = "https://download.pytorch.org/whl/cu121",
@@ -57,17 +58,35 @@ function Get-GpuComputeCapability {
   try {
     $raw = & $nvidiaSmi --query-gpu=compute_cap --format=csv,noheader 2>$null
   } catch {
-    return $null
+    $raw = $null
   }
-  if ($LASTEXITCODE -ne 0 -or -not $raw) { return $null }
+  if ($LASTEXITCODE -ne 0 -or -not $raw) {
+    $raw = $null
+  }
   $caps = @()
-  foreach ($line in ($raw -split "`r?`n")) {
-    $trim = $line.Trim()
-    if (-not $trim) { continue }
+  if ($raw) {
+    foreach ($line in ($raw -split "`r?`n")) {
+      $trim = $line.Trim()
+      if (-not $trim) { continue }
+      try {
+        $caps += [double]::Parse($trim, [System.Globalization.CultureInfo]::InvariantCulture)
+      } catch {
+        continue
+      }
+    }
+  }
+  if ($caps.Count -eq 0) {
+    Write-Log "Compute capability query returned no results; falling back to nvidia-smi -q."
     try {
-      $caps += [double]::Parse($trim, [System.Globalization.CultureInfo]::InvariantCulture)
+      $q = & $nvidiaSmi -q 2>$null
+      foreach ($line in ($q -split "`r?`n")) {
+        if ($line -match 'Compute Capability\s*:\s*([0-9]+)\.([0-9]+)') {
+          $caps += [double]::Parse(($Matches[1] + "." + $Matches[2]), [System.Globalization.CultureInfo]::InvariantCulture)
+          break
+        }
+      }
     } catch {
-      continue
+      return $null
     }
   }
   if ($caps.Count -eq 0) { return $null }
@@ -209,6 +228,22 @@ function New-Venv {
 }
 
 $venvPython = Join-Path $PSScriptRoot ".venv\\Scripts\\python.exe"
+
+if ($ModelsOnly) {
+  if (-not (Test-Path $venvPython)) {
+    Write-Host "Venv not found. Run the full installer first."
+    Write-Log "ModelsOnly requested but venv missing."
+    exit 1
+  }
+  Write-Log "Using venv python: $venvPython"
+  Write-Host "Downloading MangaJaNai models... (this can take a while)"
+  Write-Log "Downloading MangaJaNai models."
+  $dlArgs = @("host_server.py", "--download-models")
+  if ($AllowDat2) { $dlArgs += "--allow-dat2" }
+  & $venvPython @dlArgs
+  if (-not $NoPause) { pause }
+  exit 0
+}
 $needsVenv = $true
 if (Test-Path $venvPython) {
   try {
