@@ -108,12 +108,23 @@ function Invoke-Logged {
   )
   Write-Log $Label
   Write-Log ("Command: " + $Command + " " + ($CmdArgs -join " "))
+  $prevErrorAction = $ErrorActionPreference
+  $prevNative = $null
+  if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+    $prevNative = $PSNativeCommandUseErrorActionPreference
+    $PSNativeCommandUseErrorActionPreference = $false
+  }
+  $ErrorActionPreference = "Continue"
   try {
     $output = & $Command @CmdArgs 2>&1
   } catch {
     Write-Log ("Invoke failed: " + $_.Exception.Message)
+    $ErrorActionPreference = $prevErrorAction
+    if ($null -ne $prevNative) { $PSNativeCommandUseErrorActionPreference = $prevNative }
     throw
   }
+  $ErrorActionPreference = $prevErrorAction
+  if ($null -ne $prevNative) { $PSNativeCommandUseErrorActionPreference = $prevNative }
   if ($output) {
     Write-LogLines -Lines $output
   }
@@ -191,13 +202,13 @@ if (-not (Test-Path $venvPython)) {
 Write-Log "Using venv python: $venvPython"
 
 Write-Log "Installing Python dependencies."
-Invoke-Logged -Label "pip upgrade" -Command $venvPython -CmdArgs @("-m","pip","install","--upgrade","pip")
-Invoke-Logged -Label "pip requirements" -Command $venvPython -CmdArgs @("-m","pip","install","-r","requirements.txt")
+Invoke-Logged -Label "pip upgrade" -Command $venvPython -CmdArgs @("-m","pip","install","--disable-pip-version-check","--upgrade","pip")
+Invoke-Logged -Label "pip requirements" -Command $venvPython -CmdArgs @("-m","pip","install","--disable-pip-version-check","-r","requirements.txt")
 
 # CUDA Torch build (adjust CudaIndexUrl if needed)
 Write-Log "Installing Torch from $CudaIndexUrl"
-Invoke-Logged -Label "pip torch cuda" -Command $venvPython -CmdArgs @("-m","pip","install","--force-reinstall","--index-url",$CudaIndexUrl,"torch","torchvision","torchaudio")
-Invoke-Logged -Label "pip numpy" -Command $venvPython -CmdArgs @("-m","pip","install","numpy==2.2.6")
+Invoke-Logged -Label "pip torch cuda" -Command $venvPython -CmdArgs @("-m","pip","install","--disable-pip-version-check","--force-reinstall","--index-url",$CudaIndexUrl,"torch","torchvision","torchaudio")
+Invoke-Logged -Label "pip numpy" -Command $venvPython -CmdArgs @("-m","pip","install","--disable-pip-version-check","numpy==2.2.6")
 
 if (-not $SkipNativeMessaging) {
   # Register native messaging host for Chrome
