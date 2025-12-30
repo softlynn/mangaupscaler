@@ -1,0 +1,180 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Manga Upscaler</title>
+  <style>
+    :root{
+      --bg:#141218;
+      --card:#1c1822;
+      --border:rgba(255,255,255,.10);
+      --text:#f4f2f7;
+      --muted:rgba(244,242,247,.75);
+      --accent:#ff7fc8;
+      --accent2:#a58bff;
+    }
+    body{ margin:0; font: 13px/1.35 system-ui, -apple-system, Segoe UI, Roboto, Arial; background:var(--bg); color:var(--text); width: 330px; }
+    .wrap{ padding:14px; }
+    .top{ display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+    .logo{ width:34px; height:34px; border-radius:12px; background:linear-gradient(135deg,var(--accent),var(--accent2)); display:grid; place-items:center; box-shadow:0 8px 22px rgba(0,0,0,.35); }
+    .logo span{ font-weight:800; letter-spacing:.5px; }
+    h1{ margin:0; font-size:14px; font-weight:800; }
+    .sub{ margin:2px 0 0; color:var(--muted); font-size:12px; }
+    .card{ background:var(--card); border:1px solid var(--border); border-radius:18px; padding:12px; box-shadow:0 12px 28px rgba(0,0,0,.25); }
+    .row{ display:flex; align-items:center; justify-content:space-between; gap:12px; margin:10px 0; }
+    label{ color:var(--muted); }
+    .pill{ display:flex; gap:8px; }
+    select, input[type="range"]{ width: 150px; }
+    select{
+      background:#0f0d13; color:var(--text);
+      border:1px solid var(--border); border-radius:12px;
+      padding:8px 10px; outline:none;
+    }
+    input[type="range"]{ accent-color: var(--accent); }
+    .toggle{
+      width: 46px; height: 28px; border-radius:999px; border:1px solid var(--border);
+      background:#0f0d13; position:relative; cursor:pointer; flex:0 0 auto;
+    }
+    .knob{
+      width:22px; height:22px; border-radius:999px; background:rgba(255,255,255,.9);
+      position:absolute; top:2px; left:2px; transition:.18s ease;
+      box-shadow:0 6px 16px rgba(0,0,0,.35);
+    }
+    .toggle.on{ background:rgba(255,127,200,.25); border-color: rgba(255,127,200,.55); }
+    .toggle.on .knob{ left:22px; background: var(--accent); }
+    .btns{ display:flex; gap:10px; margin-top:10px; }
+    button{
+      flex:1; border:1px solid var(--border); background:#0f0d13; color:var(--text);
+      border-radius:14px; padding:10px 12px; cursor:pointer;
+      font-weight:700;
+    }
+    button.primary{ background: linear-gradient(135deg, rgba(255,127,200,.95), rgba(165,139,255,.95)); border:none; color:#120b12; }
+    button:active{ transform: translateY(1px); }
+    .tiny{ margin-top:8px; color:var(--muted); font-size:11px; }
+    .secretDot{
+      width:10px; height:10px; border-radius:99px; background:rgba(255,255,255,.08);
+      border:1px solid rgba(255,255,255,.10);
+      margin-left:auto; cursor:pointer;
+    }
+    .credits{ display:none; margin-top:10px; padding-top:10px; border-top:1px dashed rgba(255,255,255,.14); }
+    .credits.show{ display:block; }
+    .creditRow{ display:flex; align-items:center; gap:10px; }
+    .pfp{
+      width:18px; height:18px; border-radius:99px; overflow:hidden; opacity:.55;
+      border:1px solid rgba(255,255,255,.18);
+    }
+    .pfp img{ width:100%; height:100%; object-fit:cover; display:block; }
+    a.linkbtn{
+      display:inline-flex; align-items:center; justify-content:center;
+      padding:8px 10px; border-radius:12px; border:1px solid rgba(255,255,255,.14);
+      color:var(--text); text-decoration:none; background:#0f0d13;
+      font-weight:700; font-size:12px;
+    }
+
+    button, .linkbtn{
+      transition: transform .12s ease, filter .12s ease, background .12s ease;
+    }
+    button:hover, .linkbtn:hover{ transform: translateY(-1px); filter: brightness(1.07); }
+    button:active, .linkbtn:active{ transform: translateY(0px) scale(0.98); filter: brightness(0.98); }
+    .ghost{
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text);
+    }
+
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div class="logo" aria-label="logo"><span>MU</span></div>
+      <div>
+        <h1 id="title">Manga Upscaler</h1>
+        <div class="sub">Sharper text - crisp screentones - fewer artifacts</div>
+      </div>
+      <div id="secretDot" class="secretDot" title="..."></div>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <label>Enabled</label>
+        <div id="enabledToggle" class="toggle"><div class="knob"></div></div>
+      </div>
+
+      <div class="row">
+        <label>Auto panel in view</label>
+        <div id="autoToggle" class="toggle"><div class="knob"></div></div>
+      </div>
+
+      <div class="row">
+        <label>AI enhance (local host)</label>
+        <div id="aiMode" class="toggle"><div class="knob"></div></div>
+      </div>
+
+      <div class="row">
+        <label>AI quality</label>
+        <select id="aiQuality">
+          <option value="fast">Fast</option>
+          <option value="balanced">Balanced</option>
+          <option value="best">Best</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <label>Scale</label>
+        <select id="scale">
+          <option value="2">2x</option>
+          <option value="3">3x</option>
+          <option value="4">4x</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <label>Pre-upscale next pages: <span id="preN">0</span></label>
+        <input id="pre" type="range" min="0" max="4" step="1" />
+      </div>
+
+      <div class="row">
+        <label>Sharpen: <span id="sharpVal">0.35</span></label>
+        <input id="sharp" type="range" min="0" max="1" step="0.05" />
+      </div>
+
+      <div class="row">
+        <label>Denoise: <span id="dnVal">0.15</span></label>
+        <input id="denoise" type="range" min="0" max="0.6" step="0.05" />
+      </div>
+
+      <div class="row">
+        <label>Only on this site</label>
+        <div id="siteToggle" class="toggle"><div class="knob"></div></div>
+      </div>
+
+      <div class="btns">
+        <button id="run">Enhance now</button>
+        <button id="runPrimary" class="primary">Enhance + Preload</button>
+        <button id="openSettings" class="ghost" title="Open full settings">Settings</button>
+      </div>
+
+      <div class="tiny">Tip: 3x + Sharpen 0.35-0.55 looks best on 1440p.</div>
+
+      <div id="credits" class="credits">
+        <div class="creditRow">
+          <div class="pfp small"><img src="assets/creator.png" alt="" /></div>
+          <div style="flex:1">
+            <div style="font-weight:800; font-size:12px;">Softlynn</div>
+            <div style="color:var(--muted); font-size:11px;">secret credits</div>
+          </div>
+          <div class="pfp big"><img src="assets/heartgray2x.png" alt="" /></div>
+        </div>
+        <div style="display:flex; gap:10px; margin-top:10px;">
+          <a class="linkbtn" id="siteLink" href="#">Website</a>
+          <a class="linkbtn" id="supportLink" href="#">Support me</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

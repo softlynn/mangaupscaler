@@ -1,0 +1,148 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Manga Upscaler Settings</title>
+  <link rel="stylesheet" href="settings.css" />
+</head>
+<body>
+  <div class="wrap">
+    <header class="top">
+      <div class="brand">
+        <img class="logo" src="icons/icon48.png" alt="">
+        <div>
+          <div class="title">Manga Upscaler</div>
+          <div class="subtitle">Full settings • per-site whitelist</div>
+        </div>
+      </div>
+      <div class="actions">
+        <button id="saveBtn" class="btn primary">Save</button>
+      </div>
+    </header>
+
+    <section class="card">
+      <h3>General</h3>
+
+      <div class="row">
+        <div>
+          <div class="label">Enabled</div>
+          <div class="sub">Master toggle</div>
+        </div>
+        <div id="enabled" class="toggle"><div class="knob"></div></div>
+      </div>
+
+      <div class="row">
+        <div>
+          <div class="label">Auto enhance panel in view</div>
+          <div class="sub">Runs when you scroll to a new page/panel</div>
+        </div>
+        <div id="autoPanel" class="toggle"><div class="knob"></div></div>
+      </div>
+
+      <div class="row">
+        <div>
+          <div class="label">AI Enhance (MangaJaNai Host)</div>
+          <div class="sub">Best quality + removes artifacts • requires local host running</div>
+        </div>
+        <div id="aiMode" class="toggle"><div class="knob"></div></div>
+      </div>
+
+      <div class="row">
+        <div>
+          <div class="label">AI Quality</div>
+          <div class="sub">Fast, balanced, or best quality</div>
+        </div>
+        <select id="aiQuality">
+          <option value="fast">Fast</option>
+          <option value="balanced">Balanced</option>
+          <option value="best">Best</option>
+        </select>
+      </div>
+
+      <div class="grid2">
+        <label class="field">
+          <div>Scale</div>
+          <select id="scale">
+            <option value="2">2×</option>
+            <option value="3">3×</option>
+            <option value="4">4×</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <div>Pre-upscale next pages</div>
+          <input id="preUpscaleCount" type="range" min="0" max="4" step="1" />
+          <div class="val" id="preVal"></div>
+        </label>
+      </div>
+
+      <div class="grid2">
+        <label class="field">
+          <div>Sharpen (browser mode)</div>
+          <input id="sharpenStrength" type="range" min="0" max="1" step="0.01" />
+          <div class="val" id="sharpenVal"></div>
+        </label>
+
+        <label class="field">
+          <div>Denoise (browser mode)</div>
+          <input id="denoiseStrength" type="range" min="0" max="0.6" step="0.01" />
+          <div class="val" id="denoiseVal"></div>
+        </label>
+      </div>
+
+      <p class="hint">
+        Tip: for best clarity, turn on <b>AI Enhance</b> and run the local host. MangaJaNai models are designed to restore halftones and clean JPEG/moiré artifacts.
+      </p>
+      <p class="hint">
+        Real-ESRGAN “ncnn-vulkan” needs NCNN-format models (.bin/.param), not raw .pth files.
+      </p>
+    </section>
+
+    <section class="card">
+      <div class="wlHead">
+        <div>
+          <h3>Whitelist (per site)</h3>
+          <div class="sub">Extension is OFF everywhere unless a site is enabled here.</div>
+        </div>
+        <input id="filter" placeholder="Search domains…" />
+      </div>
+
+      <div id="whitelistList" class="wlList"></div>
+
+      <div class="addRow">
+        <input id="customDomain" placeholder="Add custom domain (e.g. example.com)" />
+        <button id="addDomain" class="btn">Add</button>
+      </div>
+    </section>
+
+    <section class="card creditsWrap">
+      <div class="creditsTitle">
+        <div class="pfp big"><img src="assets/heartgray2x.png" alt=""></div>
+        <div>
+          <div class="label">Credits</div>
+          <div class="sub">Creator: Softlynn</div>
+        </div>
+      </div>
+      <div class="creditLinks">
+        <a class="btn link" href="https://softlynn.carrd.co/#" target="_blank" rel="noreferrer">Website</a>
+        <a class="btn link" href="https://www.paypal.com/paypalme/softlynn" target="_blank" rel="noreferrer">Support me</a>
+      </div>
+      <div class="tinyPfp"><img src="assets/creator.png" alt=""></div>
+    </section>
+
+    <section class="card">
+      <h3>Local AI Host</h3>
+      <ol class="steps">
+        <li>Unzip the <code>native_host/</code> folder from this extension zip.</li>
+        <li>Run <code>install_windows.ps1</code> (it registers Chrome Native Messaging + starts a local server).</li>
+        <li>Download MangaJaNai models and place them in <code>models/</code>.</li>
+        <li>Install Python deps (Torch + realesrgan). Then run <code>run_host.bat</code>.</li>
+      </ol>
+      <p class="hint">When running, the host serves enhanced images at <code>http://127.0.0.1:48159/enhance</code>. The extension swaps the panel image to that URL in AI mode.</p>
+    </section>
+  </div>
+
+  <script src="settings.js"></script>
+</body>
+</html>
