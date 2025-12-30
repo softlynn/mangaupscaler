@@ -45,7 +45,12 @@ function Resolve-PathString {
 
 function Get-GpuComputeCapability {
   $nvidiaSmi = Resolve-Exec -Name "nvidia-smi"
+  if (-not $nvidiaSmi) {
+    $fallback = Join-Path ${env:ProgramFiles} "NVIDIA Corporation\NVSMI\nvidia-smi.exe"
+    if (Test-Path $fallback) { $nvidiaSmi = $fallback }
+  }
   if (-not $nvidiaSmi) { return $null }
+  Write-Log "Using nvidia-smi at $nvidiaSmi"
   try {
     $raw = & $nvidiaSmi --query-gpu=compute_cap --format=csv,noheader 2>$null
   } catch {
@@ -63,7 +68,9 @@ function Get-GpuComputeCapability {
     }
   }
   if ($caps.Count -eq 0) { return $null }
-  return ($caps | Measure-Object -Maximum).Maximum
+  $maxCap = ($caps | Measure-Object -Maximum).Maximum
+  Write-Log "Detected GPU compute capability: $maxCap"
+  return $maxCap
 }
 
 function Find-ExtensionId {
