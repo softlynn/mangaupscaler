@@ -90,6 +90,30 @@ if ($LogPath) {
   try { New-Item -ItemType File -Path $LogPath -Force | Out-Null } catch { }
 }
 
+function Write-LogLines {
+  param([string[]]$Lines)
+  if (-not $LogPath) { return }
+  foreach ($line in $Lines) {
+    if ($null -ne $line) {
+      try { Add-Content -Path $LogPath -Value $line } catch { }
+    }
+  }
+}
+
+function Invoke-Logged {
+  param(
+    [string]$Label,
+    [string]$Command,
+    [string[]]$Args
+  )
+  Write-Log $Label
+  $output = & $Command @Args 2>&1
+  Write-LogLines -Lines $output
+  if ($LASTEXITCODE -ne 0) {
+    throw "$Label failed with exit code $LASTEXITCODE"
+  }
+}
+
 $pyLauncher = Resolve-Exec -Name "py"
 $pythonExe = Resolve-Exec -Name "python"
 if (-not $pyLauncher -and -not $pythonExe) {
@@ -98,26 +122,51 @@ if (-not $pyLauncher -and -not $pythonExe) {
   exit 1
 }
 
-if (-not (Test-Path ".venv")) {
-  $venvCmd = "python"
-  $venvArgs = @()
-  if ($pyLauncher) {
-    $venvCmd = "py"
-    $venvArgs = @("-3.10")
+function New-Venv {
+  param(
+    [string]$Command,
+    [string[]]$Args
+  )
+  try {
+    $label = "Creating venv via $Command $($Args -join ' ')"
+    Write-Log $label
+    $output = & $Command @Args -m venv .venv 2>&1
+    Write-LogLines -Lines $output
+    if ($LASTEXITCODE -eq 0 -and (Test-Path ".venv\\Scripts\\python.exe")) {
+      return $true
+    }
+  } catch {
+    Write-Log ("Venv creation failed: " + $_.Exception.Message)
   }
-  Write-Log "Creating venv via $venvCmd $($venvArgs -join ' ')"
-  & $venvCmd @venvArgs -m venv .venv
+  return $false
+}
+
+if (-not (Test-Path ".venv")) {
+  $created = $false
+  if ($pyLauncher) {
+    $created = New-Venv -Command "py" -Args @("-3.10")
+    if (-not $created) {
+      $created = New-Venv -Command "py" -Args @("-3.11")
+    }
+  }
+  if (-not $created -and $pythonExe) {
+    $created = New-Venv -Command "python" -Args @()
+  }
+  if (-not $created) {
+    Write-Host "Failed to create .venv. See install.log for details."
+    exit 1
+  }
 }
 
 . .\.venv\Scripts\Activate.ps1
 Write-Log "Installing Python dependencies."
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+Invoke-Logged -Label "pip upgrade" -Command "python" -Args @("-m","pip","install","--upgrade","pip")
+Invoke-Logged -Label "pip requirements" -Command "python" -Args @("-m","pip","install","-r","requirements.txt")
 
 # CUDA Torch build (adjust CudaIndexUrl if needed)
 Write-Log "Installing Torch from $CudaIndexUrl"
-python -m pip install --force-reinstall --index-url $CudaIndexUrl torch torchvision torchaudio
-python -m pip install numpy==2.2.6
+Invoke-Logged -Label "pip torch cuda" -Command "python" -Args @("-m","pip","install","--force-reinstall","--index-url",$CudaIndexUrl,"torch","torchvision","torchaudio")
+Invoke-Logged -Label "pip numpy" -Command "python" -Args @("-m","pip","install","numpy==2.2.6")
 
 if (-not $SkipNativeMessaging) {
   # Register native messaging host for Chrome
