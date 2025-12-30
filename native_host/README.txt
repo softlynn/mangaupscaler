@@ -24,4 +24,4 @@ Notes:
 Build the installer:
 1) Run: .\build_exe.ps1
 2) Open installer\MangaUpscalerHost.iss in Inno Setup and Compile.
-3) If your extension ID differs, update it in the .iss before building.
+3) Run MangaUpscalerHostSetup.exe after loading the unpacked extension.

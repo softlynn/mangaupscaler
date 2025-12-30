@@ -4,6 +4,7 @@
 param(
   [switch]$AllowDat2,
   [switch]$SkipModelDownload,
+  [switch]$SkipNativeMessaging,
   [string]$CudaIndexUrl = "https://download.pytorch.org/whl/cu121"
 )
 
@@ -75,40 +76,42 @@ python -m pip install -r requirements.txt
 python -m pip install --force-reinstall --index-url $CudaIndexUrl torch torchvision torchaudio
 python -m pip install numpy==2.2.6
 
-# Register native messaging host for Chrome
-$extensionId = $null
-$extensionPath = Join-Path $PSScriptRoot "..\extension"
-if (Test-Path $extensionPath) {
-  $extensionPath = (Resolve-Path $extensionPath).Path
-}
-$extensionId = Find-ExtensionId -ExtensionPath $extensionPath -NameHint "Manga Upscaler"
-if (-not $extensionId) {
-  $defaultId = "kciacmbepigmndncggbcnlalmeokoknp"
-  $inputId = Read-Host "Extension ID not auto-detected. Paste your unpacked extension ID (blank = default $defaultId)"
-  if ($inputId) {
-    $extensionId = $inputId.Trim()
-  } else {
-    $extensionId = $defaultId
+if (-not $SkipNativeMessaging) {
+  # Register native messaging host for Chrome
+  $extensionId = $null
+  $extensionPath = Join-Path $PSScriptRoot "..\extension"
+  if (Test-Path $extensionPath) {
+    $extensionPath = (Resolve-Path $extensionPath).Path
   }
-  Write-Host "Using extension ID: $extensionId"
-  Write-Host "Load the unpacked extension once, then re-run this installer to auto-detect next time."
-} else {
-  Write-Host "Detected extension ID: $extensionId"
-}
-$manifestPath = Join-Path $PSScriptRoot "native_messaging_manifest.json"
-$hostPath = Join-Path $PSScriptRoot "host_launcher.bat"
-$manifest = @{
-  name = "com.softlynn.manga_upscaler"
-  description = "Softlynn Manga Upscaler native host (optional AI mode)"
-  path = $hostPath
-  type = "stdio"
-  allowed_origins = @("chrome-extension://$extensionId/")
-}
-$manifest | ConvertTo-Json -Depth 4 | Set-Content -Path $manifestPath -Encoding UTF8
+  $extensionId = Find-ExtensionId -ExtensionPath $extensionPath -NameHint "Manga Upscaler"
+  if (-not $extensionId) {
+    $defaultId = "kciacmbepigmndncggbcnlalmeokoknp"
+    $inputId = Read-Host "Extension ID not auto-detected. Paste your unpacked extension ID (blank = default $defaultId)"
+    if ($inputId) {
+      $extensionId = $inputId.Trim()
+    } else {
+      $extensionId = $defaultId
+    }
+    Write-Host "Using extension ID: $extensionId"
+    Write-Host "Load the unpacked extension once, then re-run this installer to auto-detect next time."
+  } else {
+    Write-Host "Detected extension ID: $extensionId"
+  }
+  $manifestPath = Join-Path $PSScriptRoot "native_messaging_manifest.json"
+  $hostPath = Join-Path $PSScriptRoot "host_launcher.bat"
+  $manifest = @{
+    name = "com.softlynn.manga_upscaler"
+    description = "Softlynn Manga Upscaler native host (optional AI mode)"
+    path = $hostPath
+    type = "stdio"
+    allowed_origins = @("chrome-extension://$extensionId/")
+  }
+  $manifest | ConvertTo-Json -Depth 4 | Set-Content -Path $manifestPath -Encoding UTF8
 
-$regPath = "HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.softlynn.manga_upscaler"
-New-Item -Path $regPath -Force | Out-Null
-New-ItemProperty -Path $regPath -Name "(default)" -Value $manifestPath -PropertyType String -Force | Out-Null
+  $regPath = "HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.softlynn.manga_upscaler"
+  New-Item -Path $regPath -Force | Out-Null
+  New-ItemProperty -Path $regPath -Name "(default)" -Value $manifestPath -PropertyType String -Force | Out-Null
+}
 
 # Optional model download (official MangaJaNai release)
 if (-not $SkipModelDownload) {

@@ -14,12 +14,16 @@ Real-ESRGAN with MangaJaNai/IllustrationJaNai models.
 ## Quick start
 1) Load the extension:
    - Chrome -> Extensions -> Developer mode -> Load unpacked -> `extension/`
-2) Start the local host:
+2) One-click installer (recommended):
+   - Build or download `MangaUpscalerHostSetup.exe`
+   - Run it after the extension is loaded
+   - It auto-detects the extension ID, installs deps/models, and starts the tray host
+   - Open `http://127.0.0.1:48159/health` and confirm `ok`
+3) Manual host start (if needed):
    - `cd native_host`
    - `.\install_windows.ps1`
    - `run_host.bat` (tray) or `run_host.bat --console`
-   - Open `http://127.0.0.1:48159/health` and confirm `ok`
-3) In the extension popup or settings:
+4) In the extension popup or settings:
    - Enable AI mode
    - Choose AI quality
    - Add your manga site to the whitelist

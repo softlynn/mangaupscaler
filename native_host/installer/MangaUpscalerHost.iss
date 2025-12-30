@@ -22,23 +22,31 @@ Source: "..\\dist\\host_server.py"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\\dist\\install_windows.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\\dist\\requirements.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\\dist\\host_launcher.bat"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\\dist\\models\\*"; DestDir: "{app}\\models"; Flags: recursesubdirs createallsubdirs
-Source: "..\\dist\\cache\\*"; DestDir: "{app}\\cache"; Flags: recursesubdirs createallsubdirs
+
+[Dirs]
+Name: "{app}\\models"
+Name: "{app}\\cache"
 
 [Registry]
 Root: HKCU; Subkey: "Software\\Google\\Chrome\\NativeMessagingHosts\\com.softlynn.manga_upscaler"; ValueType: string; ValueName: ""; ValueData: "{app}\\native_messaging_manifest.json"; Flags: uninsdeletekey
 
 [Run]
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\\install_windows.ps1"" -SkipNativeMessaging"; Flags: waituntilterminated postinstall skipifsilent
 Filename: "{app}\\{#MyTrayExe}"; Description: "Start Manga Upscaler Host tray"; Flags: nowait postinstall skipifsilent
 
 [Code]
+var
+  ExtIdPage: TInputQueryWizardPage;
+  DetectedExtensionId: string;
+  DefaultExtensionId: string;
+
 function DetectExtensionId(): string;
 var
   TmpFile: string;
   PsCmd: string;
   Args: string;
   ResultCode: Integer;
-  Id: string;
+  Id: AnsiString;
 begin
   Result := '';
   TmpFile := ExpandConstant('{tmp}\mu_extid.txt');
@@ -73,7 +81,31 @@ begin
   Exec('powershell.exe', Args, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
   if LoadStringFromFile(TmpFile, Id) then
-    Result := Trim(Id);
+    Result := Trim(String(Id));
+end;
+
+procedure InitializeWizard();
+begin
+  DefaultExtensionId := 'kciacmbepigmndncggbcnlalmeokoknp';
+  DetectedExtensionId := DetectExtensionId();
+  ExtIdPage := CreateInputQueryPage(
+    wpSelectDir,
+    'Extension ID',
+    'Paste your unpacked extension ID',
+    'Leave blank to use default.'
+  );
+  ExtIdPage.Add('Extension ID:', False);
+  ExtIdPage.Values[0] := DefaultExtensionId;
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  if Assigned(ExtIdPage) and (PageID = ExtIdPage.ID) then begin
+    Result := DetectedExtensionId <> '';
+    if DetectedExtensionId <> '' then
+      ExtIdPage.Values[0] := DetectedExtensionId;
+  end else
+    Result := False;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -82,22 +114,18 @@ var
   Manifest: string;
   HostPath: string;
   ExtensionId: string;
-  DefaultId: string;
 begin
   if CurStep = ssPostInstall then begin
-    DefaultId := 'kciacmbepigmndncggbcnlalmeokoknp';
-    ExtensionId := DetectExtensionId();
+    ExtensionId := DetectedExtensionId;
     if ExtensionId = '' then begin
-      ExtensionId := DefaultId;
-      if InputQuery('Extension ID', 'Paste your unpacked extension ID (blank = default).', ExtensionId) then
-        ExtensionId := Trim(ExtensionId);
+      ExtensionId := Trim(ExtIdPage.Values[0]);
       if ExtensionId = '' then
-        ExtensionId := DefaultId;
+        ExtensionId := DefaultExtensionId;
     end;
 
     ManifestPath := ExpandConstant('{app}\native_messaging_manifest.json');
     HostPath := ExpandConstant('{app}\{#MyNativeExe}');
-    HostPath := StringChange(HostPath, '\', '\\');
+    StringChange(HostPath, '\', '\\');
     Manifest :=
       '{' + #13#10 +
       '  "name": "com.softlynn.manga_upscaler",' + #13#10 +

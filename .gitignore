@@ -11,6 +11,8 @@ native_host/build/
 native_host/build_tray/
 native_host/build_native/
 native_host/*.spec
+native_host/installer/Output/
+release/
 
 __pycache__/
 *.pyc
