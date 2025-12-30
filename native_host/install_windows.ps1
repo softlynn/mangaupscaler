@@ -107,9 +107,18 @@ function Invoke-Logged {
     [string[]]$Args
   )
   Write-Log $Label
-  $output = & $Command @Args 2>&1
-  Write-LogLines -Lines $output
+  Write-Log ("Command: " + $Command + " " + ($Args -join " "))
+  try {
+    $output = & $Command @Args 2>&1
+  } catch {
+    Write-Log ("Invoke failed: " + $_.Exception.Message)
+    throw
+  }
+  if ($output) {
+    Write-LogLines -Lines $output
+  }
   if ($LASTEXITCODE -ne 0) {
+    Write-Log ("Exit code: " + $LASTEXITCODE)
     throw "$Label failed with exit code $LASTEXITCODE"
   }
 }
@@ -158,15 +167,22 @@ if (-not (Test-Path ".venv")) {
   }
 }
 
-. .\.venv\Scripts\Activate.ps1
+$venvPython = Join-Path $PSScriptRoot ".venv\\Scripts\\python.exe"
+if (-not (Test-Path $venvPython)) {
+  Write-Host "Venv python not found. See install.log for details."
+  Write-Log "Venv python missing at $venvPython"
+  exit 1
+}
+Write-Log "Using venv python: $venvPython"
+
 Write-Log "Installing Python dependencies."
-Invoke-Logged -Label "pip upgrade" -Command "python" -Args @("-m","pip","install","--upgrade","pip")
-Invoke-Logged -Label "pip requirements" -Command "python" -Args @("-m","pip","install","-r","requirements.txt")
+Invoke-Logged -Label "pip upgrade" -Command $venvPython -Args @("-m","pip","install","--upgrade","pip")
+Invoke-Logged -Label "pip requirements" -Command $venvPython -Args @("-m","pip","install","-r","requirements.txt")
 
 # CUDA Torch build (adjust CudaIndexUrl if needed)
 Write-Log "Installing Torch from $CudaIndexUrl"
-Invoke-Logged -Label "pip torch cuda" -Command "python" -Args @("-m","pip","install","--force-reinstall","--index-url",$CudaIndexUrl,"torch","torchvision","torchaudio")
-Invoke-Logged -Label "pip numpy" -Command "python" -Args @("-m","pip","install","numpy==2.2.6")
+Invoke-Logged -Label "pip torch cuda" -Command $venvPython -Args @("-m","pip","install","--force-reinstall","--index-url",$CudaIndexUrl,"torch","torchvision","torchaudio")
+Invoke-Logged -Label "pip numpy" -Command $venvPython -Args @("-m","pip","install","numpy==2.2.6")
 
 if (-not $SkipNativeMessaging) {
   # Register native messaging host for Chrome
@@ -210,7 +226,7 @@ if (-not $SkipModelDownload) {
   Write-Log "Downloading MangaJaNai models."
   $dlArgs = @("host_server.py", "--download-models")
   if ($AllowDat2) { $dlArgs += "--allow-dat2" }
-  python @dlArgs
+  & $venvPython @dlArgs
 }
 
 Write-Host ""
