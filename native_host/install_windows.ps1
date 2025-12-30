@@ -51,6 +51,7 @@ function Find-NvidiaSmi {
   if ($fromPath) { return $fromPath }
 
   $candidates = @(
+    "C:\Windows\System32\nvidia-smi.exe",
     "C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe",
     "C:\Program Files (x86)\NVIDIA Corporation\NVSMI\nvidia-smi.exe"
   )
@@ -67,6 +68,16 @@ function Find-NvidiaSmi {
 
   foreach ($path in $candidates | Where-Object { $_ }) {
     if (Test-Path $path) { return $path }
+  }
+
+  $programDataRoot = Join-Path $env:ProgramData "NVIDIA Corporation\NVIDIA App\UpdateFramework\ota-artifacts\grd\post-processing"
+  if (Test-Path $programDataRoot) {
+    try {
+      $found = Get-ChildItem -Path $programDataRoot -Recurse -Filter "nvidia-smi.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+      if ($found) { return $found.FullName }
+    } catch {
+      # ignore search errors
+    }
   }
   return $null
 }
