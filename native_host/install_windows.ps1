@@ -109,6 +109,13 @@ function Write-TempRequirements {
   return $tmp
 }
 
+function Write-TempPythonScript {
+  param([string]$Name, [string]$Content)
+  $tmp = Join-Path $env:TEMP $Name
+  [System.IO.File]::WriteAllText($tmp, $Content)
+  return $tmp
+}
+
 function Find-ExtensionId {
   param(
     [string]$ExtensionPath,
@@ -301,9 +308,9 @@ $torchPre = $false
 if (-not $PSBoundParameters.ContainsKey("CudaIndexUrl")) {
   $cap = Get-GpuComputeCapability
   if ($cap -ge 12.0) {
-    $torchIndexUrl = "https://download.pytorch.org/whl/nightly/cu129"
-    $torchPre = $true
-    $msg = "Detected GPU compute capability $cap; using nightly CUDA 12.9 build."
+    $torchIndexUrl = "https://download.pytorch.org/whl/cu128"
+    $torchPre = $false
+    $msg = "Detected GPU compute capability $cap; using CUDA 12.8 build."
     Write-Host $msg
     Write-Log $msg
   }
@@ -313,6 +320,54 @@ $torchArgs = @("-m","pip","install","--disable-pip-version-check","--force-reins
 if ($torchPre) { $torchArgs = @("-m","pip","install","--disable-pip-version-check","--force-reinstall","--pre","--index-url",$torchIndexUrl,"torch","torchvision","torchaudio") }
 Invoke-Logged -Label "pip torch cuda" -Command $venvPython -CmdArgs $torchArgs
 Invoke-Logged -Label "pip numpy" -Command $venvPython -CmdArgs @("-m","pip","install","--disable-pip-version-check","numpy==2.2.6")
+
+$cudaCheckScript = @'
+import json
+import torch
+
+info = {
+    "torch_version": torch.__version__,
+    "cuda_version": torch.version.cuda,
+    "cuda_available": torch.cuda.is_available(),
+}
+if torch.cuda.is_available():
+    info["device_name"] = torch.cuda.get_device_name(0)
+    cap = torch.cuda.get_device_capability(0)
+    info["device_capability"] = f"{cap[0]}.{cap[1]}"
+    try:
+        info["arch_list"] = torch.cuda.get_arch_list()
+    except Exception as exc:
+        info["arch_list_error"] = str(exc)
+print(json.dumps(info))
+'@
+$cudaCheckPath = Write-TempPythonScript -Name "mu_cuda_check.py" -Content $cudaCheckScript
+Write-Log "CUDA check"
+Write-Log ("Command: " + $venvPython + " " + $cudaCheckPath)
+$cudaOut = & $venvPython $cudaCheckPath 2>&1
+Write-LogLines -Lines $cudaOut
+try {
+  $jsonLine = $cudaOut | Where-Object { $_ -match '^\s*\{' } | Select-Object -Last 1
+  if ($jsonLine) {
+    $info = $jsonLine | ConvertFrom-Json
+    if ($info.cuda_available -and $info.device_capability -and $info.arch_list) {
+      $capStr = ($info.device_capability -replace '\.','')
+      $sm = "sm_$capStr"
+      if ($info.arch_list -notcontains $sm) {
+        $warn = "CUDA build does not include $sm; GPU acceleration may fail. Re-run installer with -CudaIndexUrl to a compatible build."
+        Write-Host $warn
+        Write-Log $warn
+      }
+    } elseif (-not $info.cuda_available) {
+      $warn = "CUDA not available after install; using CPU (slow)."
+      Write-Host $warn
+      Write-Log $warn
+    }
+  }
+} catch {
+  Write-Log ("CUDA check parse failed: " + $_.Exception.Message)
+}
+try { Remove-Item $cudaCheckPath -Force } catch { }
+
 
 if (-not $SkipNativeMessaging) {
   # Register native messaging host for Chrome
