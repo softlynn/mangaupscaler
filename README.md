@@ -30,7 +30,7 @@ Recommended IllustrationJaNai files (color panels):
 - `4x_IllustrationJaNai_V1_DAT2_190k.pth` (best)
 
 MangaJaNai files (grayscale panels):
-- Place the 2x/4x MangaJaNai height models in `native_host/models/`
+- Move all grayscale MangaJaNai `.pth` models into `native_host/models/`
 
 Install deps:
 ```
