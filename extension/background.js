@@ -172,9 +172,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const hostError = resp.headers.get('X-MU-Host-Error') || '';
         const blob = await resp.blob();
         const buffer = await blob.arrayBuffer();
+        // Some Chrome builds/extensions have flaky ArrayBuffer transfer over sendMessage for large payloads.
+        // Also include base64 as a robust fallback transport.
+        const b64 = arrayBufferToBase64(buffer);
         const contentType = (resp.headers.get('content-type') || blob.type || 'image/png').split(';')[0];
         const elapsedMs = Date.now() - t0;
-        sendResponse({ ok: true, buffer, contentType, model, hostError, elapsedMs });
+        sendResponse({ ok: true, buffer, b64, byteLength: buffer.byteLength, contentType, model, hostError, elapsedMs });
         return;
       }
 
@@ -270,4 +273,14 @@ function dataUrlToBytes(dataUrl) {
   const bytes = new Uint8Array(len);
   for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
   return { bytes, contentType };
+}
+
+function arrayBufferToBase64(buffer){
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
 }

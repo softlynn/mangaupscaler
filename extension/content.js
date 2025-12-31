@@ -312,6 +312,26 @@ function arrayBufferToDataUrl(buffer, contentType){
   return `data:${contentType || 'application/octet-stream'};base64,${btoa(binary)}`;
 }
 
+function base64ToArrayBuffer(b64){
+  const bin = atob(String(b64 || ''));
+  const len = bin.length;
+  if (!len) throw new Error('Empty base64 payload');
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+}
+
+function normalizeToArrayBuffer(value){
+  if (!value) return null;
+  try{
+    if (value instanceof ArrayBuffer) return value;
+    if (ArrayBuffer.isView(value)) {
+      return value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+    }
+  } catch {}
+  return null;
+}
+
 function makeToast(text){
   if (!settings.showToast) return;
   if (!toastEl) {
@@ -792,8 +812,10 @@ async function enhanceViaHost(srcUrl, opts={}){
   if (resp.hostError) {
     throw new Error(resp.hostError);
   }
-  if (resp.buffer) {
-    const blob = new Blob([resp.buffer], { type: resp.contentType || 'image/png' });
+  if (resp.buffer || resp.b64) {
+    const ab = normalizeToArrayBuffer(resp.buffer) || (resp.b64 ? base64ToArrayBuffer(resp.b64) : null);
+    if (!ab) throw new Error('AI returned invalid payload');
+    const blob = new Blob([ab], { type: resp.contentType || 'image/png' });
     if (!blob.size) throw new Error('AI returned empty image');
     const objectUrl = URL.createObjectURL(blob);
     return {
