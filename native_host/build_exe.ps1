@@ -16,12 +16,19 @@ python -m pip install pyinstaller
 python -m pip install pystray pillow
 
 $distPath = Join-Path $PSScriptRoot $DistDir
+$iconPath = Join-Path $PSScriptRoot "installer\\assets\\mangaupscaler.ico"
+$hasIcon = Test-Path $iconPath
 
 if (Test-Path "build_tray") { Remove-Item "build_tray" -Recurse -Force }
 if (Test-Path "build_native") { Remove-Item "build_native" -Recurse -Force }
 
-python -m PyInstaller --noconsole --onefile --name MangaUpscalerHost tray_app.py --distpath $distPath --workpath build_tray --specpath build_tray --clean
-python -m PyInstaller --onefile --name MangaUpscalerNativeHost native_messaging_host.py --distpath $distPath --workpath build_native --specpath build_native --clean
+if ($hasIcon) {
+  python -m PyInstaller --noconsole --onefile --name MangaUpscalerHost tray_app.py --distpath $distPath --workpath build_tray --specpath build_tray --clean --icon $iconPath
+  python -m PyInstaller --onefile --name MangaUpscalerNativeHost native_messaging_host.py --distpath $distPath --workpath build_native --specpath build_native --clean --icon $iconPath
+} else {
+  python -m PyInstaller --noconsole --onefile --name MangaUpscalerHost tray_app.py --distpath $distPath --workpath build_tray --specpath build_tray --clean
+  python -m PyInstaller --onefile --name MangaUpscalerNativeHost native_messaging_host.py --distpath $distPath --workpath build_native --specpath build_native --clean
+}
 
 Copy-Item (Join-Path $PSScriptRoot "config.json") $distPath -Force
 Copy-Item (Join-Path $PSScriptRoot "host_server.py") $distPath -Force

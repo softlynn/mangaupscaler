@@ -8,7 +8,7 @@ const DEFAULTS = {
   whitelist: {}, // { "example.com": true }
   showToast: true,
   watermark: true,
-  aiMode: false,
+  aiMode: true,
   aiQuality: 'balanced'
 };
 

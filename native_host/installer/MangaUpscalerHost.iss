@@ -14,8 +14,9 @@ PrivilegesRequired=lowest
 OutputBaseFilename=MangaUpscalerHostSetup
 Compression=lzma
 SolidCompression=yes
-WizardImageFile=..\..\extension\icons\mangaupscaler.png
-WizardSmallImageFile=..\..\extension\icons\mangaupscaler.png
+SetupIconFile=assets\mangaupscaler.ico
+WizardImageFile=assets\wizard_image.png
+WizardSmallImageFile=assets\wizard_small.png
 
 [Files]
 Source: "..\\dist\\{#MyTrayExe}"; DestDir: "{app}"; Flags: ignoreversion
@@ -69,28 +70,44 @@ begin
     DeleteFile(TmpFile);
 
   PsCmd :=
-    '$ErrorActionPreference="SilentlyContinue";' +
-    '$root = Join-Path $env:LOCALAPPDATA ''Google\Chrome\User Data'';' +
-    '$id = $null;' +
-    'if (Test-Path $root) {' +
-    ' $profiles = Get-ChildItem -Path $root -Directory | Where-Object { $_.Name -eq ''Default'' -or $_.Name -like ''Profile *'' };' +
-    ' foreach ($p in $profiles) {' +
-    '  foreach ($pref in @(''Preferences'',''Secure Preferences'')) {' +
-    '   $prefPath = Join-Path $p.FullName $pref;' +
-    '   if (-not (Test-Path $prefPath)) { continue };' +
-    '   try { $json = Get-Content $prefPath -Raw | ConvertFrom-Json } catch { continue };' +
-    '   $settings = $json.extensions.settings;' +
-    '   if (-not $settings) { continue };' +
-    '   foreach ($prop in $settings.PSObject.Properties) {' +
-    '     $entry = $prop.Value;' +
-    '     if ($entry.manifest -and $entry.manifest.name -eq ''Manga Upscaler'') { $id = $prop.Name; break }' +
+    '$ErrorActionPreference=''SilentlyContinue'';' +
+    '$id=$null;' +
+    '$roots=@(' +
+    ' (Join-Path $env:LOCALAPPDATA ''Google\Chrome\User Data''),' +
+    ' (Join-Path $env:LOCALAPPDATA ''Google\Chrome Beta\User Data''),' +
+    ' (Join-Path $env:LOCALAPPDATA ''Google\Chrome SxS\User Data''),' +
+    ' (Join-Path $env:LOCALAPPDATA ''Microsoft\Edge\User Data''),' +
+    ' (Join-Path $env:LOCALAPPDATA ''BraveSoftware\Brave-Browser\User Data''),' +
+    ' (Join-Path $env:LOCALAPPDATA ''Chromium\User Data'')' +
+    ');' +
+    'foreach($root in $roots){' +
+    ' if(-not (Test-Path $root)){ continue };' +
+    ' $profiles=Get-ChildItem -Path $root -Directory | Where-Object { $_.Name -eq ''Default'' -or $_.Name -like ''Profile *'' };' +
+    ' foreach($p in $profiles){' +
+    '  foreach($pref in @(''Secure Preferences'',''Preferences'')){' +
+    '   $prefPath=Join-Path $p.FullName $pref;' +
+    '   if(-not (Test-Path $prefPath)){ continue };' +
+    '   try{ $json=Get-Content $prefPath -Raw | ConvertFrom-Json } catch { continue };' +
+    '   $settings=$json.extensions.settings;' +
+    '   if(-not $settings){ continue };' +
+    '   foreach($prop in $settings.PSObject.Properties){' +
+    '    $entry=$prop.Value;' +
+    '    $path=$entry.path;' +
+    '    if(-not $path){ continue };' +
+    '    $manifestPath=Join-Path $path ''manifest.json'';' +
+    '    if(Test-Path $manifestPath){' +
+    '      try{ $m=Get-Content $manifestPath -Raw | ConvertFrom-Json } catch { $m=$null };' +
+    '      if($m -and $m.name -eq ''Manga Upscaler''){ $id=$prop.Name; break }' +
+    '    }' +
+    '    if(-not $id -and ($path -like ''*MangaUpscaler*'' -or $path -like ''*MangaUpscalerExtension*'')){ $id=$prop.Name; break }' +
     '   }' +
-    '   if ($id) { break }' +
+    '   if($id){ break }' +
     '  }' +
-    '  if ($id) { break }' +
+    '  if($id){ break }' +
     ' }' +
+    ' if($id){ break }' +
     '}' +
-    'if ($id) { Set-Content -Path ''' + TmpFile + ''' -Value $id }';
+    'if($id){ Set-Content -Path ''' + TmpFile + ''' -Value $id }';
 
   Args := '-NoProfile -ExecutionPolicy Bypass -Command "' + PsCmd + '"';
   Exec('powershell.exe', Args, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);

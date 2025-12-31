@@ -9,7 +9,7 @@ const DEFAULTS = {
   whitelist: {},
   showToast: true,
   watermark: true,
-  aiMode: false,
+  aiMode: true,
   aiQuality: 'balanced',
   allowDat2: false,
   cacheMaxGb: 1.0,

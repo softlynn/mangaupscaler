@@ -7,6 +7,7 @@ can use to swap manga panel images to AI-enhanced versions without lagging the w
 
 Endpoints:
   GET /health
+  GET /status
   GET /enhance?url=<img_url>&scale=2|3|4
   POST /enhance
   POST /config
@@ -37,6 +38,7 @@ an X-MU-Host-Error header explaining what's missing.
 """
 from __future__ import annotations
 import hashlib, io, json, os, sys, threading, time, traceback, urllib.parse, re, types, importlib.util, importlib
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -249,6 +251,8 @@ _model_blocks: dict[str, int] = {}
 _last_cache_cleanup = 0.0
 _last_enhance_ts = 0.0
 _idle_stop = threading.Event()
+_active_enhances = 0
+_active_enhances_lock = threading.Lock()
 
 def _pick_height(h: int, scale: int, model_type: str) -> int:
   mp = CFG.get("model_map_by_type", {}).get(model_type, {}).get(str(scale), {})
@@ -334,6 +338,31 @@ def _normalize_outscale(scale: int) -> int:
   except Exception:
     scale = int(CFG.get("default_scale", 2) or 2)
   return 2 if scale < 2 else 4 if scale > 4 else scale
+
+def _normalize_output_format(fmt: str | None) -> str:
+  fmt = (fmt or CFG.get("default_output_format", "png")).strip().lower()
+  return "webp" if fmt in ("webp", "webpl", "webp-lossless", "webp_lossless") else "png"
+
+def _cache_ext_for_format(fmt: str) -> str:
+  return "webp" if fmt == "webp" else "png"
+
+def _encode_output(out_img: Image.Image, fmt: str, is_gray: bool) -> tuple[bytes, str]:
+  buf = io.BytesIO()
+  if fmt == "webp":
+    try:
+      kwargs = {"format": "WEBP", "method": 4}
+      if is_gray:
+        kwargs.update({"lossless": True, "quality": 100})
+      else:
+        kwargs.update({"quality": 95})
+      out_img.save(buf, **kwargs)
+      return buf.getvalue(), "image/webp"
+    except Exception as e:
+      _log(f"WEBP encode failed; falling back to PNG: {e}")
+      buf = io.BytesIO()
+  # PNG optimize can be surprisingly slow on large images; favor speed.
+  out_img.save(buf, format="PNG", compress_level=3)
+  return buf.getvalue(), "image/png"
 
 def _has_manga_scale(scale: int) -> bool:
   try:
@@ -656,6 +685,27 @@ def _touch_enhance():
   global _last_enhance_ts
   _last_enhance_ts = time.time()
 
+@contextmanager
+def _enhance_activity():
+  global _active_enhances
+  with _active_enhances_lock:
+    _active_enhances += 1
+  try:
+    yield
+  finally:
+    with _active_enhances_lock:
+      _active_enhances = max(0, _active_enhances - 1)
+
+def _status_payload() -> dict:
+  with _active_enhances_lock:
+    active = int(_active_enhances)
+  return {
+    "ok": True,
+    "busy": active > 0,
+    "active": active,
+    "idle_seconds": max(0.0, time.time() - float(_last_enhance_ts or 0.0)),
+  }
+
 def _get_idle_minutes() -> float:
   try:
     return float(CFG.get("idle_shutdown_minutes", 5) or 0)
@@ -733,7 +783,7 @@ def _choose_model_type(is_grayscale: bool) -> str:
   has_illu = any(bool(v) for v in illu.values()) or any(bool(v) for v in illu_q.values())
   return "illustration" if has_illu else "manga"
 
-def enhance_bytes(img_bytes: bytes, outscale: int, quality: str | None) -> tuple[bytes, str]:
+def enhance_bytes(img_bytes: bytes, outscale: int, quality: str | None, out_format: str | None = None) -> tuple[bytes, str, str]:
   global _engine, _engine_key
   img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
   w, h = img.size
@@ -743,6 +793,7 @@ def enhance_bytes(img_bytes: bytes, outscale: int, quality: str | None) -> tuple
   model_type = _choose_model_type(is_gray)
   q = _normalize_quality(quality)
   outscale = _normalize_outscale(outscale)
+  fmt = _normalize_output_format(out_format)
   model_path = None
   height_key = None
   model_scale = _model_scale_for_outscale(outscale, model_type, q)
@@ -792,19 +843,17 @@ def enhance_bytes(img_bytes: bytes, outscale: int, quality: str | None) -> tuple
     resid_tag = " resid"
   out_img = Image.fromarray(out_rgb)
 
-  buf = io.BytesIO()
-  # PNG optimize can be surprisingly slow on large images; favor speed.
-  out_img.save(buf, format="PNG", compress_level=3)
+  out_bytes, ctype = _encode_output(out_img, fmt, is_gray)
   if height_key:
     label = f"{model_type}:{height_key}p x{outscale} {q}{resid_tag}"
   else:
     label = f"{model_type}:{q} x{outscale}{resid_tag}"
-  return buf.getvalue(), label
+  return out_bytes, label, ctype
 
 class Handler(BaseHTTPRequestHandler):
   def log_message(self, fmt, *args):
     try:
-      if self.path.startswith("/health"):
+      if self.path.startswith("/health") or self.path.startswith("/status"):
         return
     except Exception:
       pass
@@ -835,44 +884,51 @@ class Handler(BaseHTTPRequestHandler):
       parsed = urllib.parse.urlparse(self.path)
       if parsed.path == "/health":
         return self._send(200, b"ok")
+      if parsed.path == "/status":
+        body = json.dumps(_status_payload()).encode("utf-8")
+        return self._send(200, body, "application/json")
       if parsed.path != "/enhance":
         return self._send(404, b"not found")
-      _touch_enhance()
+      with _enhance_activity():
+        _touch_enhance()
 
-      qs = urllib.parse.parse_qs(parsed.query or "")
-      url = (qs.get("url") or [""])[0]
-      outscale = int((qs.get("scale") or [CFG.get("default_scale", 2)])[0])
-      outscale = _normalize_outscale(outscale)
-      quality = (qs.get("quality") or [CFG.get("default_quality", "balanced")])[0]
+        qs = urllib.parse.parse_qs(parsed.query or "")
+        url = (qs.get("url") or [""])[0]
+        outscale = int((qs.get("scale") or [CFG.get("default_scale", 2)])[0])
+        outscale = _normalize_outscale(outscale)
+        quality = (qs.get("quality") or [CFG.get("default_quality", "balanced")])[0]
+        out_fmt = _normalize_output_format((qs.get("format") or qs.get("fmt") or [None])[0])
 
-      if not url:
-        return self._send(400, b"missing url")
+        if not url:
+          return self._send(400, b"missing url")
 
-      # Simple disk cache keyed by url+scale
-      _cleanup_cache_if_needed()
-      cache_key = str(abs(hash(f"v{CACHE_VERSION}::{url}::{outscale}::{quality}")))
-      cache_path = os.path.join(CACHE_DIR, f"{cache_key}.png")
-      if os.path.exists(cache_path):
-        with open(cache_path, "rb") as f:
-          return self._send(200, f.read(), "image/png", {"X-MU-Model":"cache"})
+        # Simple disk cache keyed by url+scale+quality+format
+        _cleanup_cache_if_needed()
+        cache_ext = _cache_ext_for_format(out_fmt)
+        cache_key = str(abs(hash(f"v{CACHE_VERSION}::{url}::{outscale}::{quality}::{out_fmt}")))
+        cache_path = os.path.join(CACHE_DIR, f"{cache_key}.{cache_ext}")
+        if os.path.exists(cache_path):
+          with open(cache_path, "rb") as f:
+            ctype = "image/webp" if cache_ext == "webp" else "image/png"
+            return self._send(200, f.read(), ctype, {"X-MU-Model":"cache"})
 
-      # Download
-      r = requests.get(url, timeout=20, headers={"User-Agent":"MangaUpscalerHost/1.0"})
-      r.raise_for_status()
-      src_bytes = r.content
+        # Download
+        r = requests.get(url, timeout=20, headers={"User-Agent":"MangaUpscalerHost/1.0"})
+        r.raise_for_status()
+        src_bytes = r.content
 
-      # Try enhance, fallback to passthrough if missing deps/models
-      try:
-        out_bytes, model_name = enhance_bytes(src_bytes, outscale, quality)
-        with open(cache_path, "wb") as f:
-          f.write(out_bytes)
-        return self._send(200, out_bytes, "image/png", {"X-MU-Model": model_name})
-      except Exception as e:
-        # passthrough original image
-        err = (str(e) or e.__class__.__name__).encode("utf-8", "ignore")[:400]
-        _log(f"enhance failed (GET): {err.decode('utf-8','ignore')}")
-        ctype = r.headers.get("content-type","application/octet-stream").split(";")[0]
-        return self._send(200, src_bytes, ctype, {"X-MU-Host-Error": err.decode("utf-8","ignore")})
+        # Try enhance, fallback to passthrough if missing deps/models
+        try:
+          out_bytes, model_name, ctype = enhance_bytes(src_bytes, outscale, quality, out_fmt)
+          with open(cache_path, "wb") as f:
+            f.write(out_bytes)
+          return self._send(200, out_bytes, ctype, {"X-MU-Model": model_name})
+        except Exception as e:
+          # passthrough original image
+          err = (str(e) or e.__class__.__name__).encode("utf-8", "ignore")[:400]
+          _log(f"enhance failed (GET): {err.decode('utf-8','ignore')}")
+          ctype = r.headers.get("content-type","application/octet-stream").split(";")[0]
+          return self._send(200, src_bytes, ctype, {"X-MU-Host-Error": err.decode("utf-8","ignore")})
 
     except Exception as e:
       tb = traceback.format_exc()
@@ -930,37 +986,41 @@ class Handler(BaseHTTPRequestHandler):
 
       if parsed.path != "/enhance":
         return self._send(404, b"not found")
-      _touch_enhance()
+      with _enhance_activity():
+        _touch_enhance()
 
-      qs = urllib.parse.parse_qs(parsed.query or "")
-      outscale = int((qs.get("scale") or [CFG.get("default_scale", 2)])[0])
-      outscale = _normalize_outscale(outscale)
-      quality = (qs.get("quality") or [CFG.get("default_quality", "balanced")])[0]
+        qs = urllib.parse.parse_qs(parsed.query or "")
+        outscale = int((qs.get("scale") or [CFG.get("default_scale", 2)])[0])
+        outscale = _normalize_outscale(outscale)
+        quality = (qs.get("quality") or [CFG.get("default_quality", "balanced")])[0]
+        out_fmt = _normalize_output_format((qs.get("format") or qs.get("fmt") or [None])[0])
 
-      length = int(self.headers.get("Content-Length", "0"))
-      if length <= 0:
-        return self._send(400, b"missing body")
-      src_bytes = self.rfile.read(length)
-      if not src_bytes:
-        return self._send(400, b"empty body")
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0:
+          return self._send(400, b"missing body")
+        src_bytes = self.rfile.read(length)
+        if not src_bytes:
+          return self._send(400, b"empty body")
 
-      # Cache by content hash + scale + quality
-      _cleanup_cache_if_needed()
-      h = hashlib.sha1(src_bytes + f"::{outscale}::{quality}::v{CACHE_VERSION}".encode("utf-8")).hexdigest()
-      cache_path = os.path.join(CACHE_DIR, f"{h}.png")
-      if os.path.exists(cache_path):
-        with open(cache_path, "rb") as f:
-          return self._send(200, f.read(), "image/png", {"X-MU-Model":"cache"})
+        # Cache by content hash + scale + quality + format
+        _cleanup_cache_if_needed()
+        cache_ext = _cache_ext_for_format(out_fmt)
+        h = hashlib.sha1(src_bytes + f"::{outscale}::{quality}::{out_fmt}::v{CACHE_VERSION}".encode("utf-8")).hexdigest()
+        cache_path = os.path.join(CACHE_DIR, f"{h}.{cache_ext}")
+        if os.path.exists(cache_path):
+          with open(cache_path, "rb") as f:
+            ctype = "image/webp" if cache_ext == "webp" else "image/png"
+            return self._send(200, f.read(), ctype, {"X-MU-Model":"cache"})
 
-      try:
-        out_bytes, model_name = enhance_bytes(src_bytes, outscale, quality)
-        with open(cache_path, "wb") as f:
-          f.write(out_bytes)
-        return self._send(200, out_bytes, "image/png", {"X-MU-Model": model_name})
-      except Exception as e:
-        err = (str(e) or e.__class__.__name__).encode("utf-8", "ignore")[:400]
-        _log(f"enhance failed (POST): {err.decode('utf-8','ignore')}")
-        return self._send(200, src_bytes, "application/octet-stream", {"X-MU-Host-Error": err.decode("utf-8","ignore")})
+        try:
+          out_bytes, model_name, ctype = enhance_bytes(src_bytes, outscale, quality, out_fmt)
+          with open(cache_path, "wb") as f:
+            f.write(out_bytes)
+          return self._send(200, out_bytes, ctype, {"X-MU-Model": model_name})
+        except Exception as e:
+          err = (str(e) or e.__class__.__name__).encode("utf-8", "ignore")[:400]
+          _log(f"enhance failed (POST): {err.decode('utf-8','ignore')}")
+          return self._send(200, src_bytes, "application/octet-stream", {"X-MU-Host-Error": err.decode("utf-8","ignore")})
     except Exception:
       tb = traceback.format_exc()
       _log(tb)

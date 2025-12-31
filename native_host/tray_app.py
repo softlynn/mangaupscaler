@@ -7,9 +7,24 @@ import sys
 import threading
 import time
 import urllib.request
+import ctypes
 
 import pystray
 from PIL import Image, ImageDraw
+
+def _set_dpi_awareness():
+  if os.name != "nt":
+    return
+  try:
+    # Per-monitor V2 when available (crisper menus on scaled displays).
+    try:
+      ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+      ctypes.windll.user32.SetProcessDPIAware()
+  except Exception:
+    pass
+
+_set_dpi_awareness()
 
 def _get_root_dir() -> str:
   if getattr(sys, "frozen", False):
@@ -20,6 +35,7 @@ ROOT = _get_root_dir()
 HOST = "127.0.0.1"
 PORT = 48159
 HEALTH_URL = f"http://{HOST}:{PORT}/health"
+STATUS_URL = f"http://{HOST}:{PORT}/status"
 SHUTDOWN_URL = f"http://{HOST}:{PORT}/shutdown"
 MODELS_DIR = os.path.join(ROOT, "models")
 CACHE_DIR = os.path.join(ROOT, "cache")
@@ -68,6 +84,15 @@ def _ping_host() -> bool:
       return resp.status == 200
   except Exception:
     return False
+
+def _fetch_status() -> dict | None:
+  try:
+    with urllib.request.urlopen(STATUS_URL, timeout=0.8) as resp:
+      if resp.status != 200:
+        return None
+      return json.loads(resp.read().decode("utf-8", "ignore") or "{}")
+  except Exception:
+    return None
 
 
 class HostController:
@@ -138,6 +163,21 @@ def _load_icon() -> Image.Image:
   img = Image.new("RGB", (64, 64), (24, 20, 30))
   draw = ImageDraw.Draw(img)
   draw.ellipse((10, 10, 54, 54), fill=(255, 127, 200), outline=(250, 230, 240))
+  return img
+
+def _make_busy_icon(base: Image.Image) -> Image.Image:
+  try:
+    img = base.convert("RGBA").copy()
+  except Exception:
+    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+  w, h = img.size
+  r = max(5, min(w, h) // 7)
+  pad = max(2, r // 2)
+  cx = w - pad - r
+  cy = h - pad - r
+  draw = ImageDraw.Draw(img)
+  draw.ellipse((cx - r - 2, cy - r - 2, cx + r + 2, cy + r + 2), fill=(0, 0, 0, 120))
+  draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=(46, 204, 113, 255), outline=(255, 255, 255, 220))
   return img
 
 
@@ -232,11 +272,28 @@ def _on_quit(icon, item, ctl: HostController):
   icon.stop()
 
 
-def _status_loop(icon, ctl: HostController):
+def _status_loop(icon, ctl: HostController, idle_icon: Image.Image, busy_icon: Image.Image):
+  last_busy = None
   while True:
-    running = ctl.is_running()
-    icon.title = f"Manga Upscaler Host ({'running' if running else 'stopped'})"
-    time.sleep(2)
+    st = _fetch_status()
+    running = bool(st and st.get("ok"))
+    busy = bool(st and st.get("busy")) if running else False
+
+    if running and busy:
+      icon.title = "Manga Upscaler Host (enhancing)"
+    elif running:
+      icon.title = "Manga Upscaler Host (running)"
+    else:
+      icon.title = "Manga Upscaler Host (stopped)"
+
+    if last_busy is None or busy != last_busy:
+      try:
+        icon.icon = busy_icon if busy else idle_icon
+      except Exception:
+        pass
+      last_busy = busy
+
+    time.sleep(0.7 if running else 1.4)
 
 
 def main():
@@ -259,8 +316,10 @@ def main():
     pystray.MenuItem("Quit", lambda icon, item: _on_quit(icon, item, ctl))
   )
 
-  icon = pystray.Icon("MangaUpscalerHost", _load_icon(), "Manga Upscaler Host", menu)
-  threading.Thread(target=_status_loop, args=(icon, ctl), daemon=True).start()
+  idle_icon = _load_icon()
+  busy_icon = _make_busy_icon(idle_icon)
+  icon = pystray.Icon("MangaUpscalerHost", idle_icon, "Manga Upscaler Host", menu)
+  threading.Thread(target=_status_loop, args=(icon, ctl, idle_icon, busy_icon), daemon=True).start()
   icon.run()
 
 

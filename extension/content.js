@@ -19,7 +19,7 @@ const DEFAULTS = {
   whitelist: {},               // {hostname:true}
   showToast: true,
   watermark: true,
-  aiMode: false
+  aiMode: true
 };
 
 let settings = { ...DEFAULTS };
@@ -84,6 +84,54 @@ function hostAllowed() {
 function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
 
 function log(...a){ console.log('[MangaUpscaler]', ...a); }
+
+function isHttpUrl(url){
+  return typeof url === 'string' && (url.startsWith('http://') || url.startsWith('https://'));
+}
+
+function waitForImageLoad(imgEl, timeoutMs=15000){
+  return new Promise((resolve, reject) => {
+    if (!imgEl) return reject(new Error('Missing img'));
+
+    let done = false;
+    const finishOk = () => {
+      if (done) return;
+      done = true;
+      cleanup();
+      resolve(true);
+    };
+    const finishErr = (e) => {
+      if (done) return;
+      done = true;
+      cleanup();
+      const msg = String(e?.message || e || 'Image failed to load');
+      reject(new Error(msg));
+    };
+    const cleanup = () => {
+      clearTimeout(t);
+      imgEl.removeEventListener('load', finishOk);
+      imgEl.removeEventListener('error', finishErr);
+    };
+
+    const t = setTimeout(() => finishErr(new Error('Image load timeout')), timeoutMs);
+    imgEl.addEventListener('load', finishOk, { once: true });
+    imgEl.addEventListener('error', finishErr, { once: true });
+
+    setTimeout(() => {
+      if (imgEl.complete && imgEl.naturalWidth > 0) finishOk();
+    }, 0);
+  });
+}
+
+function arrayBufferToDataUrl(buffer, contentType){
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return `data:${contentType || 'application/octet-stream'};base64,${btoa(binary)}`;
+}
 
 function makeToast(text){
   if (!settings.showToast) return;
@@ -440,6 +488,7 @@ async function enhanceViaHost(srcUrl){
   if (!srcUrl) throw new Error('Missing image url');
   const scale = clamp(Number(settings.scale || 3), 2, 4);
   const quality = String(settings.aiQuality || 'balanced');
+  const format = 'webp';
   if (Date.now() < aiHostDownUntil) throw new Error('AI host cooldown');
 
   maybeStartHost('enhance');
@@ -451,20 +500,30 @@ async function enhanceViaHost(srcUrl){
 
   let resp;
   try{
-    if (srcUrl.startsWith('data:') || srcUrl.startsWith('blob:')) {
+    if (isHttpUrl(srcUrl)) {
+      resp = await chrome.runtime.sendMessage({
+        type: 'AI_ENHANCE_URL',
+        sourceUrl: srcUrl,
+        scale,
+        quality,
+        format
+      });
+    } else if (srcUrl.startsWith('data:') || srcUrl.startsWith('blob:')) {
       const dataUrl = await fetchImageAsDataURL(srcUrl);
       resp = await chrome.runtime.sendMessage({
         type: 'FETCH_AI_ENHANCE',
         dataUrl,
         scale,
-        quality
+        quality,
+        format
       });
     } else {
       resp = await chrome.runtime.sendMessage({
         type: 'FETCH_AI_ENHANCE',
         sourceUrl: srcUrl,
         scale,
-        quality
+        quality,
+        format
       });
     }
   } finally {
@@ -477,6 +536,9 @@ async function enhanceViaHost(srcUrl){
   }
   if (resp.hostError) {
     throw new Error(resp.hostError);
+  }
+  if (resp.url) {
+    return { src: resp.url, isObjectUrl: false, model: '', elapsedMs: 0 };
   }
   if (resp.buffer) {
     const blob = new Blob([resp.buffer], { type: resp.contentType || 'image/png' });
@@ -512,6 +574,10 @@ function replaceImgSrc(imgEl, newSrc, isObjectUrl=false){
   } else {
     delete imgEl.dataset.muObjectUrl;
   }
+
+  // Some sites use <picture>/<img srcset>; ensure our replacement is used.
+  try { imgEl.removeAttribute('srcset'); } catch {}
+  try { imgEl.removeAttribute('sizes'); } catch {}
 
   imgEl.src = newSrc;
   imgEl.style.imageRendering = 'auto';
@@ -559,9 +625,40 @@ async function processImageElement(imgEl){
   }
 
   clearTimeout(overlayTimer);
-  if (removeOverlay) removeOverlay();
 
-  replaceImgSrc(imgEl, out, outIsObjectUrl);
+  const setAndWait = async (newSrc, isObj) => {
+    replaceImgSrc(imgEl, newSrc, isObj);
+    await waitForImageLoad(imgEl, 20000);
+  };
+
+  try{
+    await setAndWait(out, outIsObjectUrl);
+  } catch (e1) {
+    // Primary path is setting <img> to the host URL (fast, avoids message-size limits).
+    // If blocked by CSP/mixed-content, fall back to blob:/data:.
+    if (settings.aiMode && isHttpUrl(src) && !outIsObjectUrl) {
+      const scale = clamp(Number(settings.scale || 3), 2, 4);
+      const quality = String(settings.aiQuality || 'balanced');
+      const resp = await chrome.runtime.sendMessage({ type: 'FETCH_AI_ENHANCE', sourceUrl: src, scale, quality, format: 'webp' });
+      if (!resp?.ok || !resp.buffer) throw e1;
+      if (resp.hostError) throw new Error(resp.hostError);
+
+      const blob = new Blob([resp.buffer], { type: resp.contentType || 'image/webp' });
+      const objectUrl = URL.createObjectURL(blob);
+      try{
+        await setAndWait(objectUrl, true);
+      } catch {
+        const dataUrl = arrayBufferToDataUrl(resp.buffer, resp.contentType || 'image/webp');
+        await setAndWait(dataUrl, false);
+      }
+      model = resp.model || model;
+    } else {
+      throw e1;
+    }
+  } finally {
+    if (removeOverlay) removeOverlay();
+  }
+
   imgEl.dataset.muUpscaled = '1';
   sparkle(imgEl.getBoundingClientRect());
 

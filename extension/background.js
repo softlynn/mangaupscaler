@@ -150,12 +150,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
 
       if (msg?.type === 'FETCH_AI_ENHANCE') {
-        const { sourceUrl, dataUrl, scale, quality } = msg || {};
+        const { sourceUrl, dataUrl, scale, quality, format } = msg || {};
         const t0 = Date.now();
         if (!await ensureHostRunning('enhance')) throw new Error('AI host not running');
         const qs = new URLSearchParams();
         if (typeof scale === 'number') qs.set('scale', String(scale));
         if (quality) qs.set('quality', String(quality));
+        if (format) qs.set('format', String(format));
         if (sourceUrl) qs.set('url', sourceUrl);
         const url = `${AI_HOST}/enhance?${qs.toString()}`;
 
@@ -174,6 +175,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const contentType = (resp.headers.get('content-type') || blob.type || 'image/png').split(';')[0];
         const elapsedMs = Date.now() - t0;
         sendResponse({ ok: true, buffer, contentType, model, hostError, elapsedMs });
+        return;
+      }
+
+      if (msg?.type === 'AI_ENHANCE_URL') {
+        const { sourceUrl, scale, quality, format } = msg || {};
+        if (!sourceUrl) throw new Error('Missing sourceUrl');
+        if (!await ensureHostRunning('enhance_url')) throw new Error('AI host not running');
+        const qs = new URLSearchParams();
+        if (typeof scale === 'number') qs.set('scale', String(scale));
+        if (quality) qs.set('quality', String(quality));
+        if (format) qs.set('format', String(format));
+        qs.set('url', sourceUrl);
+        sendResponse({ ok: true, url: `${AI_HOST}/enhance?${qs.toString()}` });
         return;
       }
 
