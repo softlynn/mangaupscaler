@@ -523,33 +523,30 @@ async function sniffMimeFromBlob(blob){
 }
 
 async function decodeBlobToBitmap(blob){
+  const errs = [];
   // 1) createImageBitmap works for most cases and is not subject to page img-src CSP.
   try{
     return await createImageBitmap(blob);
-  } catch {
-    // 2) WebCodecs ImageDecoder fallback when available (also bypasses img-src CSP).
-    try{
-      if (typeof ImageDecoder !== 'undefined') {
-        const sniff = await sniffMimeFromBlob(blob);
-        const type = (blob.type && blob.type !== 'application/octet-stream') ? blob.type : (sniff || 'image/webp');
-        const dec = new ImageDecoder({ data: blob, type });
-        const frame = await dec.decode({ frameIndex: 0 });
-        try { await dec.close(); } catch {}
-        return frame.image;
-      }
-    } catch {
-      // ignore
-    }
+  } catch (e) {
+    errs.push(`createImageBitmap: ${String(e?.message || e || 'failed')}`);
   }
 
-  // 3) Last resort: decode via <img>. This can be blocked by CSP.
-  const obj = URL.createObjectURL(blob);
+  // 2) WebCodecs ImageDecoder fallback when available (also bypasses img-src CSP).
   try{
-    const im = await loadImage(obj);
-    return im;
-  } finally {
-    try { URL.revokeObjectURL(obj); } catch {}
+    if (typeof ImageDecoder !== 'undefined') {
+      const sniff = await sniffMimeFromBlob(blob);
+      const type = (blob.type && blob.type !== 'application/octet-stream') ? blob.type : (sniff || 'image/webp');
+      const dec = new ImageDecoder({ data: blob, type });
+      const frame = await dec.decode({ frameIndex: 0 });
+      try { await dec.close(); } catch {}
+      return frame.image;
+    }
+    errs.push('ImageDecoder: unavailable');
+  } catch (e) {
+    errs.push(`ImageDecoder: ${String(e?.message || e || 'failed')}`);
   }
+
+  throw new Error(`AI image decode failed: ${errs.join(' | ')}`);
 }
 
 // ---------- Enhancement pipeline ----------
@@ -738,11 +735,11 @@ async function enhanceToDataURL(dataUrl){
   return canvas.toDataURL('image/png');
 }
 
-async function enhanceViaHost(srcUrl){
+async function enhanceViaHost(srcUrl, opts={}){
   if (!srcUrl) throw new Error('Missing image url');
   const scale = clamp(Number(settings.scale || 3), 2, 4);
   const quality = String(settings.aiQuality || 'balanced');
-  const format = 'webp';
+  const format = String(opts.format || 'webp');
   if (Date.now() < aiHostDownUntil) throw new Error('AI host cooldown');
 
   maybeStartHost('enhance');
@@ -997,7 +994,23 @@ async function processImageElement(imgEl){
           await setAndWait(dataUrl, false);
         } catch (e2) {
           // Strict CSP often blocks data:/blob: in <img>. Canvas overlay still works.
-          await renderBlobOverImage(imgEl, outBlob);
+          try{
+            await renderBlobOverImage(imgEl, outBlob);
+          } catch (e3) {
+            // Some sites block blob/data for <img>, and some browsers can fail to decode webp via createImageBitmap.
+            // Retry once using PNG from host, then render overlay.
+            const msg = String(e3?.message || e3 || '');
+            if (msg.includes('AI image decode failed')) {
+              const aiPng = await enhanceViaHost(src, { format: 'png' });
+              if (aiPng?.blob) {
+                await renderBlobOverImage(imgEl, aiPng.blob);
+              } else {
+                throw e3;
+              }
+            } else {
+              throw e3;
+            }
+          }
         }
       } else {
         throw e1;
@@ -1007,7 +1020,11 @@ async function processImageElement(imgEl){
     // On failure, restore the original image so we don't leave a broken data:/blob: src behind.
     try { restoreImg(imgEl); } catch {}
     try { clearCanvasOverlay(imgEl); } catch {}
-    try { imgEl.dataset.muFailUntil = String(Date.now() + 15000); } catch {}
+    try {
+      const msg = String(e?.message || e || '');
+      const backoff = msg.includes('decode') ? 60000 : 15000;
+      imgEl.dataset.muFailUntil = String(Date.now() + backoff);
+    } catch {}
     throw e;
   } finally {
     clearTimeout(overlayTimer);
