@@ -39,9 +39,12 @@ if (CanvasRenderingContext2D && !CanvasRenderingContext2D.prototype.roundRect){
 }
 
 let busy = false;
-let lastProcessedUrl = null;
 let observerStarted = false;
 let aiHostDownUntil = 0;
+let aiHostFailCount = 0;
+let cooldownRetryTimer = null;
+let cooldownRetryPreload = false;
+let cooldownNotifiedUntil = 0;
 let toastEl = null;
 let toastTimer = null;
 let io = null;
@@ -546,21 +549,29 @@ async function enhanceViaHost(srcUrl){
   }
 
   if (!resp?.ok) {
-    aiHostDownUntil = Date.now() + 20000;
+    aiHostFailCount = (aiHostFailCount || 0) + 1;
+    // Only cooldown after repeated failures, otherwise normal scrolling can trigger cooldowns.
+    if (aiHostFailCount >= 5) {
+      aiHostDownUntil = Date.now() + 20000;
+      aiHostFailCount = 0;
+      throw new Error('AI host cooldown');
+    }
     throw new Error(resp?.error || 'AI host not available');
   }
+  aiHostFailCount = 0;
   if (resp.hostError) {
     throw new Error(resp.hostError);
   }
   if (resp.buffer) {
     const blob = new Blob([resp.buffer], { type: resp.contentType || 'image/png' });
+    if (!blob.size) throw new Error('AI returned empty image');
     const objectUrl = URL.createObjectURL(blob);
     return {
       src: objectUrl,
       isObjectUrl: true,
       model: resp.model || '',
       elapsedMs: resp.elapsedMs || 0,
-      buffer: resp.buffer,
+      blob,
       contentType: (resp.contentType || blob.type || 'image/png')
     };
   }
@@ -577,12 +588,21 @@ function replaceImgSrc(imgEl, newSrc, isObjectUrl=false){
   if (!imgEl.dataset.muStyleHeight) {
     imgEl.dataset.muStyleHeight = imgEl.style.height || '';
   }
+  if (!('muStyleObjectFit' in imgEl.dataset)) {
+    imgEl.dataset.muStyleObjectFit = imgEl.style.objectFit || '';
+  }
+  if (!('muSrcset' in imgEl.dataset)) {
+    imgEl.dataset.muSrcset = imgEl.getAttribute('srcset') || '';
+  }
+  if (!('muSizes' in imgEl.dataset)) {
+    imgEl.dataset.muSizes = imgEl.getAttribute('sizes') || '';
+  }
   if (!hasSizing && rect.width > 0 && rect.height > 0) {
     imgEl.style.width = `${Math.round(rect.width)}px`;
     imgEl.style.height = `${Math.round(rect.height)}px`;
     imgEl.style.objectFit = 'contain';
   }
-  imgEl.dataset.muOriginalSrc = imgEl.dataset.muOriginalSrc || imgEl.src;
+  imgEl.dataset.muOriginalSrc = imgEl.dataset.muOriginalSrc || (imgEl.currentSrc || imgEl.src);
 
   const prevObjectUrl = imgEl.dataset.muObjectUrl || '';
   if (prevObjectUrl && prevObjectUrl !== newSrc) {
@@ -602,6 +622,48 @@ function replaceImgSrc(imgEl, newSrc, isObjectUrl=false){
   imgEl.style.imageRendering = 'auto';
 }
 
+function restoreImg(imgEl){
+  if (!imgEl) return;
+
+  const prevObjectUrl = imgEl.dataset.muObjectUrl || '';
+  if (prevObjectUrl) {
+    try { URL.revokeObjectURL(prevObjectUrl); } catch {}
+    delete imgEl.dataset.muObjectUrl;
+  }
+
+  const originalSrc = imgEl.dataset.muOriginalSrc;
+  if (originalSrc) {
+    imgEl.src = originalSrc;
+  }
+
+  if ('muSrcset' in imgEl.dataset) {
+    const v = imgEl.dataset.muSrcset;
+    if (v) imgEl.setAttribute('srcset', v);
+    else imgEl.removeAttribute('srcset');
+  }
+  if ('muSizes' in imgEl.dataset) {
+    const v = imgEl.dataset.muSizes;
+    if (v) imgEl.setAttribute('sizes', v);
+    else imgEl.removeAttribute('sizes');
+  }
+
+  if ('muStyleWidth' in imgEl.dataset) imgEl.style.width = imgEl.dataset.muStyleWidth || '';
+  if ('muStyleHeight' in imgEl.dataset) imgEl.style.height = imgEl.dataset.muStyleHeight || '';
+  if ('muStyleObjectFit' in imgEl.dataset) imgEl.style.objectFit = imgEl.dataset.muStyleObjectFit || '';
+
+  delete imgEl.dataset.muUpscaled;
+}
+
+function scheduleAfterCooldown(preload){
+  cooldownRetryPreload = !!preload;
+  if (cooldownRetryTimer) return;
+  const waitMs = Math.max(0, aiHostDownUntil - Date.now()) + 600;
+  cooldownRetryTimer = setTimeout(() => {
+    cooldownRetryTimer = null;
+    processOnce(cooldownRetryPreload, true).catch(()=>{});
+  }, waitMs);
+}
+
 function getNextCandidateImages(currentImg, n){
   if (n <= 0) return [];
   const imgs = Array.from(document.images || []).filter(i => i && i.src && i !== currentImg);
@@ -618,9 +680,6 @@ async function processImageElement(imgEl){
   const src = imgEl.currentSrc || imgEl.src;
   if (!src) return;
 
-  if (src === lastProcessedUrl) return; // avoid loops
-  lastProcessedUrl = src;
-
   // If already upscaled by us, skip
   if (imgEl.dataset.muUpscaled === '1') return;
 
@@ -634,7 +693,7 @@ async function processImageElement(imgEl){
   try{
     let out;
     let outIsObjectUrl = false;
-    let outBuffer = null;
+    let outBlob = null;
     let outContentType = '';
 
     if (settings.aiMode) {
@@ -642,7 +701,7 @@ async function processImageElement(imgEl){
       out = ai.src;
       model = ai.model;
       outIsObjectUrl = !!ai.isObjectUrl;
-      outBuffer = ai.buffer || null;
+      outBlob = ai.blob || null;
       outContentType = ai.contentType || '';
     } else {
       const data = await fetchImageAsDataURL(src);
@@ -657,14 +716,21 @@ async function processImageElement(imgEl){
     try{
       await setAndWait(out, outIsObjectUrl);
     } catch (e1) {
-      // If blob: is blocked by CSP, fall back to data:.
-      if (settings.aiMode && outIsObjectUrl && outBuffer) {
-        const dataUrl = arrayBufferToDataUrl(outBuffer, outContentType || 'image/webp');
+      // If blob: is blocked by CSP, fall back to data: generated from the Blob.
+      if (settings.aiMode && outIsObjectUrl && outBlob) {
+        const dataUrl = await blobToDataURL(outBlob);
+        if (!/^data:[^;]+;base64,.+/.test(dataUrl)) {
+          throw new Error('AI returned empty image');
+        }
         await setAndWait(dataUrl, false);
       } else {
         throw e1;
       }
     }
+  } catch (e) {
+    // On failure, restore the original image so we don't leave a broken data:/blob: src behind.
+    try { restoreImg(imgEl); } catch {}
+    throw e;
   } finally {
     clearTimeout(overlayTimer);
     if (removeOverlay) removeOverlay();
@@ -710,6 +776,14 @@ async function processOnce(preload, showStatus){
   } catch(e){
     log('Enhance failed:', e);
     const msg = String(e?.message || e || '').slice(0, 120);
+    if (settings.aiMode && msg.includes('AI host cooldown')) {
+      scheduleAfterCooldown(preload);
+      if (Date.now() > cooldownNotifiedUntil) {
+        cooldownNotifiedUntil = aiHostDownUntil || (Date.now() + 20000);
+        makeToast('AI cooling down… will retry soon');
+      }
+      return;
+    }
     if (settings.aiMode && msg) {
       makeToast(`AI failed: ${msg}`);
     } else {
