@@ -3,10 +3,9 @@ const DEFAULTS = {
   enabled: true,
   autoPanel: true,
   scale: 3,
-  preUpscaleCount: 1,
+  preUpscaleCount: 3,
   whitelist: {},
   showToast: true,
-  aiMode: true,
   aiQuality: 'balanced',
   allowDat2: false,
   cacheMaxGb: 1.0,
@@ -112,7 +111,6 @@ async function readUIIntoSettings(){
   s.enabled = getToggle($('enabled'));
   s.autoPanel = getToggle($('autoPanel'));
   s.showToast = getToggle($('showToast'));
-  s.aiMode = getToggle($('aiMode'));
   s.allowDat2 = getToggle($('allowDat2'));
   s.aiQuality = String($('aiQuality')?.value || s.aiQuality || 'balanced');
   s.scale = Number($('scale').value) || 3;
@@ -174,7 +172,6 @@ async function init(){
   setToggle($('enabled'), s.enabled);
   setToggle($('autoPanel'), s.autoPanel);
   setToggle($('showToast'), s.showToast);
-  setToggle($('aiMode'), s.aiMode);
   setToggle($('allowDat2'), s.allowDat2);
   $('aiQuality').value = String(s.aiQuality || 'balanced');
 
@@ -195,7 +192,7 @@ async function init(){
   });
 
   // toggle blocks
-  ['enabled','autoPanel','showToast','aiMode','allowDat2'].forEach(id=>{
+  ['enabled','autoPanel','showToast','allowDat2'].forEach(id=>{
     $(id).addEventListener('click', ()=>$(id).classList.toggle('on'));
   });
 
@@ -214,16 +211,15 @@ async function init(){
     await saveSettings(out);
     // let content scripts refresh quickly
     chrome.runtime.sendMessage({ type:'SETTINGS_UPDATED' }).catch(()=>{});
-    if (out.aiMode) {
-      chrome.runtime.sendMessage({
-        type:'HOST_CONFIG',
-        cacheMaxGb: out.cacheMaxGb,
-        cacheMaxAgeDays: out.cacheMaxAgeDays,
-        allowDat2: out.allowDat2,
-        idleShutdownMinutes: out.idleShutdownMinutes
-      }).catch(()=>{});
-    } else {
-      chrome.runtime.sendMessage({ type:'HOST_STOP', reason:'ai_mode_off' }).catch(()=>{});
+    chrome.runtime.sendMessage({
+      type:'HOST_CONFIG',
+      cacheMaxGb: out.cacheMaxGb,
+      cacheMaxAgeDays: out.cacheMaxAgeDays,
+      allowDat2: out.allowDat2,
+      idleShutdownMinutes: out.idleShutdownMinutes
+    }).catch(()=>{});
+    if (!out.enabled) {
+      chrome.runtime.sendMessage({ type:'HOST_STOP', reason:'disabled' }).catch(()=>{});
     }
     $('saveBtn').textContent = 'Saved!';
     setTimeout(()=> $('saveBtn').textContent = 'Save', 900);

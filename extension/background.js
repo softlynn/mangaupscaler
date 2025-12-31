@@ -40,6 +40,34 @@ const NATIVE_HOST = 'com.softlynn.manga_upscaler';
 
 let hostOkUntil = 0;
 
+function ensureContextMenu() {
+  try{
+    chrome.contextMenus.removeAll(()=>{
+      chrome.contextMenus.create({
+        id: 'mu-enhance-image',
+        title: 'Manga Upscaler: Enhance this image',
+        contexts: ['image']
+      });
+    });
+  } catch {
+    // ignore
+  }
+}
+
+chrome.runtime.onInstalled.addListener(() => {
+  ensureContextMenu();
+});
+chrome.runtime.onStartup.addListener(() => {
+  ensureContextMenu();
+});
+
+chrome.contextMenus.onClicked.addListener((info, tab) => {
+  if (info.menuItemId !== 'mu-enhance-image') return;
+  const url = info.srcUrl || '';
+  if (!tab?.id || !url) return;
+  chrome.tabs.sendMessage(tab.id, { type: 'ENHANCE_IMAGE_URL', url }).catch(()=>{});
+});
+
 async function delay(ms){
   return new Promise(resolve => setTimeout(resolve, ms));
 }

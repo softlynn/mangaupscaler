@@ -2,10 +2,9 @@ const DEFAULTS = {
   enabled: true,
   autoPanel: true,
   scale: 3,
-  preUpscaleCount: 1,
+  preUpscaleCount: 3,
   whitelist: {}, // { "example.com": true }
   showToast: true,
-  aiMode: true,
   aiQuality: 'balanced'
 };
 
@@ -23,7 +22,6 @@ const runPrimary = $('runPrimary');
 const siteLink = $('siteLink');
 const supportLink = $('supportLink');
 const openSettings = $('openSettings');
-const aiMode = $('aiMode');
 const aiQuality = $('aiQuality');
 const siteStatus = $('siteStatus');
 
@@ -54,8 +52,8 @@ function setRowDisabled(el, on){
 
 function applySiteLock(allowed){
   siteLocked = !allowed;
-  [enabledToggle, autoToggle, aiMode].forEach(t => t.classList.toggle('locked', siteLocked));
-  [scale, pre, aiQuality].forEach(el => setControlDisabled(el, siteLocked));
+  [enabledToggle, autoToggle].forEach(t => t.classList.toggle('locked', siteLocked));
+  [scale, pre, aiQuality].forEach(el => setControlDisabled(el, siteLocked || !getToggle(enabledToggle)));
   if (siteLocked){
     setToggle(enabledToggle, false);
     if (siteStatus) siteStatus.textContent = 'Disabled on this site. Toggle "Only on this site" to enable.';
@@ -64,15 +62,12 @@ function applySiteLock(allowed){
   }
 }
 
-function applyAiModeState(on){
+function applyEnabledState(on){
   const isOn = !!on;
   setControlDisabled(aiQuality, siteLocked || !isOn);
   setControlDisabled(scale, siteLocked || !isOn);
   setControlDisabled(pre, siteLocked || !isOn);
   [run, runPrimary].forEach(btn => { if (btn) btn.disabled = siteLocked || !isOn; });
-  if (!siteLocked && siteStatus) {
-    siteStatus.textContent = isOn ? '' : 'AI enhance is off. Turn it on to enhance panels.';
-  }
 }
 
 function setToggle(el, on){
@@ -92,7 +87,6 @@ async function load(){
 
   setToggle(enabledToggle, !!s.enabled);
   setToggle(autoToggle, !!s.autoPanel);
-  setToggle(aiMode, !!s.aiMode);
   scale.value = String(s.scale ?? 3);
   aiQuality.value = String(s.aiQuality ?? 'balanced');
 
@@ -105,7 +99,7 @@ async function load(){
   setToggle(siteToggle, siteOn);
   const allowed = isHostAllowed(currentHost, wh);
   applySiteLock(allowed);
-  applyAiModeState(!!s.aiMode);
+  applyEnabledState(!!s.enabled);
 
   siteLink.addEventListener('click', (e)=>{ e.preventDefault(); chrome.tabs.create({url:'https://softlynn.carrd.co/#'}); });
   openSettings.addEventListener('click', ()=>{
@@ -135,9 +129,10 @@ enabledToggle.addEventListener('click', async ()=>{
   await sendCommand({type:'SETTINGS_UPDATED'});
   if (!on) {
     await sendCommand({type:'HOST_STOP', reason:'disabled'});
-  } else if (getToggle(aiMode)) {
+  } else {
     await sendCommand({type:'HOST_START', reason:'enabled'});
   }
+  applyEnabledState(on);
 });
 
 autoToggle.addEventListener('click', async ()=>{
@@ -158,16 +153,6 @@ siteToggle.addEventListener('click', async ()=>{
   await save({whitelist: wh});
   await sendCommand({type:'SETTINGS_UPDATED'});
   applySiteLock(isHostAllowed(currentHost, wh));
-});
-
-aiMode.addEventListener('click', async ()=>{
-  if (siteLocked) return;
-  const on = !getToggle(aiMode);
-  setToggle(aiMode, on);
-  await save({ aiMode: on });
-  await sendCommand({ type:'SETTINGS_UPDATED' });
-  await sendCommand({ type: on ? 'HOST_START' : 'HOST_STOP', reason:'ai_mode' });
-  applyAiModeState(on);
 });
 
 aiQuality.addEventListener('change', async ()=>{

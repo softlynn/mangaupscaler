@@ -11,11 +11,10 @@ const DEFAULTS = {
   enabled: true,
   autoPanel: true,
   scale: 3,
-  preUpscaleCount: 1,          // 0..4
+  preUpscaleCount: 3,          // 0..5
   aiQuality: 'balanced',       // fast/balanced/best
   whitelist: {},               // {hostname:true}
-  showToast: true,
-  aiMode: true
+  showToast: true
 };
 
 let settings = { ...DEFAULTS };
@@ -57,7 +56,7 @@ async function loadSettings() {
 }
 
 function maybeStartHost(reason){
-  if (!settings.enabled || !settings.aiMode) return;
+  if (!settings.enabled) return;
   if (!hostAllowed()) return;
   const now = Date.now();
   if (now - lastHostStartAt < 8000) return;
@@ -427,12 +426,37 @@ function showOverlay(_rect, text){
   return () => { try { root.remove(); } catch {} };
 }
 
+function isComixReader(){
+  try { return location.hostname === 'comix.to'; } catch { return false; }
+}
+
 // Pick the "panel in view": largest visible <img> by viewport intersection area.
 function findBestVisibleImage(){
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const centerY = vh / 2;
+  const centerX = vw / 2;
+
+  const scoreImg = (img, area) => {
+    try{
+      const r = img.getBoundingClientRect();
+      const cx = r.left + r.width / 2;
+      const cy = r.top + r.height / 2;
+      const dx = Math.abs(cx - centerX) / Math.max(1, vw);
+      const dy = Math.abs(cy - centerY) / Math.max(1, vh);
+      // Prefer "near center" even if only partially visible.
+      const centerBoost = 1 / (1 + dx + dy * 1.4);
+      // On comix.to, we care more about what you're currently approaching (top-of-panel included).
+      const comixBoost = isComixReader() ? 1.15 : 1.0;
+      return area * centerBoost * comixBoost;
+    }catch{
+      return area;
+    }
+  };
+
   if (visibleScores && visibleScores.size > 0){
     let best = null;
     let bestScore = 0;
-    for (const [img, score] of visibleScores){
+    for (const [img, area] of visibleScores){
       if (!img || !img.isConnected || !(img.currentSrc || img.src)) {
         visibleScores.delete(img);
         continue;
@@ -442,8 +466,9 @@ function findBestVisibleImage(){
         visibleScores.delete(img);
         continue;
       }
-      if (score > bestScore){
-        bestScore = score;
+      const s = scoreImg(img, area);
+      if (s > bestScore){
+        bestScore = s;
         best = img;
       }
     }
@@ -451,7 +476,6 @@ function findBestVisibleImage(){
   }
 
   const imgs = Array.from(document.images || []);
-  const vw = window.innerWidth, vh = window.innerHeight;
   let best = null;
   let bestScore = 0;
 
@@ -467,7 +491,8 @@ function findBestVisibleImage(){
     const ih = Math.min(r.bottom, vh) - Math.max(r.top, 0);
     if (iw <= 0 || ih <= 0) continue;
 
-    const score = iw * ih;
+    const area = iw * ih;
+    const score = scoreImg(img, area);
     if (score > bestScore){
       bestScore = score;
       best = img;
@@ -751,17 +776,17 @@ function bumpAiBurstAndMaybeCooldown(countForCooldown, preload){
   if (!countForCooldown) return false;
   const now = Date.now();
   // If it's been a while since the last successful enhance, reset the burst counter.
-  if (!aiBurstLastAt || (now - aiBurstLastAt) > 45000) {
+  if (!aiBurstLastAt || (now - aiBurstLastAt) > 25000) {
     aiBurstCount = 0;
   }
   aiBurstLastAt = now;
   aiBurstCount += 1;
 
-  const limit = 5;
+  const limit = 8;
   if (aiBurstCount < limit) return false;
 
   aiBurstCount = 0;
-  aiHostDownUntil = now + 20000;
+  aiHostDownUntil = now + 8000;
   scheduleAfterCooldown(preload);
 
   if (Date.now() > cooldownNotifiedUntil) {
@@ -795,27 +820,37 @@ function getNextCandidateImages(currentImg, n){
     if (top > (curTop + window.innerHeight * 8.0)) return false;
     return true;
   });
-  // Prefer those near/below the current image
-  const scored = imgs.map(i=>{
-    const top = i.getBoundingClientRect().top + window.scrollY;
-    return { i, d: Math.abs(top - curTop), below: top >= curTop ? 0 : 1 };
-  }).sort((a,b)=> (a.below - b.below) || (a.d - b.d));
+
+  // Prefer DOM order / visual order below the current panel.
+  const ordered = imgs
+    .map(i => ({ i, top: i.getBoundingClientRect().top + window.scrollY }))
+    .sort((a, b) => a.top - b.top);
+
+  const below = ordered.filter(x => x.top > (curTop + 4)).slice(0, n).map(x => x.i);
+  if (below.length >= n) return below;
+
+  // Fallback: nearest by distance.
+  const scored = ordered.map(x => ({ i: x.i, d: Math.abs(x.top - curTop), below: x.top >= curTop ? 0 : 1 }))
+    .sort((a,b)=> (a.below - b.below) || (a.d - b.d));
   return scored.slice(0, n).map(x=>x.i);
 }
 
 async function preloadAiForImage(imgEl){
   if (!imgEl) return false;
-  const until = Number(imgEl.dataset?.muPreloadUntil || 0);
-  if (until && Date.now() < until) return true;
-
   const src = getBestImageUrl(imgEl);
   if (!src || !isHttpUrl(src) || isEmptyBase64DataUrl(src)) return false;
-
-  imgEl.dataset.muPreloadUntil = String(Date.now() + 60000);
 
   const scale = clamp(Number(settings.scale || 3), 2, 4);
   const quality = String(settings.aiQuality || 'balanced');
   const format = 'webp';
+
+  const key = `${src}::s=${scale}::q=${quality}::f=${format}`;
+  const prevKey = String(imgEl.dataset?.muPreloadKey || '');
+  const until = Number(imgEl.dataset?.muPreloadUntil || 0);
+  if (prevKey === key && until && Date.now() < until) return true;
+
+  imgEl.dataset.muPreloadKey = key;
+  imgEl.dataset.muPreloadUntil = String(Date.now() + 20000);
 
   maybeStartHost('preload');
   const resp = await chrome.runtime.sendMessage({
@@ -930,10 +965,6 @@ async function processImageElement(imgEl){
 async function processOnce(preload, showStatus){
   if (!settings.enabled) return;
   if (!hostAllowed()) return;
-  if (!settings.aiMode) {
-    if (showStatus) makeToast('AI enhance is off');
-    return;
-  }
 
   if (Date.now() < aiHostDownUntil) {
     scheduleAfterCooldown(preload);
@@ -960,7 +991,7 @@ async function processOnce(preload, showStatus){
     if (shouldBurstLimit && bumpAiBurstAndMaybeCooldown(true, preload)) return;
 
     if (preload){
-      const next = getNextCandidateImages(img, clamp(Number(settings.preUpscaleCount||0), 0, 4));
+      const next = getNextCandidateImages(img, clamp(Number(settings.preUpscaleCount||0), 0, 5));
       for (const ni of next){
         try{
           // AI preload: warm the host disk cache without touching page DOM (prevents flicker + CSP issues).
@@ -1008,7 +1039,6 @@ function startAuto(){
   const onTick = () => {
     if (busy) return;
     if (!settings.enabled || !settings.autoPanel || !hostAllowed()) return;
-    if (!settings.aiMode) return;
     // Don't spam: only run if current visible image not yet processed
     const img = findBestVisibleImage();
     if (!img) return;
@@ -1092,7 +1122,7 @@ function startAuto(){
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.type === 'SETTINGS_UPDATED') {
     loadSettings().then(()=>{
-      if (!settings.enabled || !hostAllowed() || !settings.aiMode) {
+      if (!settings.enabled || !hostAllowed()) {
         maybeStopHost('settings_update');
         restoreAllUpscaledImages();
       } else {
@@ -1102,6 +1132,25 @@ chrome.runtime.onMessage.addListener((msg) => {
   }
   if (msg?.type === 'RUN_ONCE') {
     processOnce(!!msg.preload, true);
+  }
+  if (msg?.type === 'ENHANCE_IMAGE_URL') {
+    (async ()=>{
+      try{
+        if (!settings.enabled || !hostAllowed()) return;
+        const url = String(msg?.url || '');
+        if (!url) throw new Error('Missing image url');
+        const imgs = Array.from(document.images || []);
+        const target = imgs.find(i => {
+          const u = getBestImageUrl(i);
+          return u === url || i.currentSrc === url || i.src === url;
+        });
+        if (!target) throw new Error('Image element not found');
+        await processImageElement(target);
+      }catch(e){
+        log('Context enhance failed:', e);
+        makeToast(String(e?.message || e || 'Enhance failed'));
+      }
+    })();
   }
   if (msg?.type === 'HOST_START') {
     maybeStartHost(msg.reason || 'popup');
@@ -1117,9 +1166,7 @@ chrome.runtime.onMessage.addListener((msg) => {
 
   if (!hostAllowed()) return; // no work on non-whitelisted sites
 
-  if (settings.aiMode && settings.enabled) {
-    maybeStartHost('init');
-  }
+  if (settings.enabled) maybeStartHost('init');
 
   startAuto();
   log('Ready', { host: location.hostname, enabled: settings.enabled });

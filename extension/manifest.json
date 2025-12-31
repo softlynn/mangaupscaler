@@ -5,6 +5,7 @@
   "description": "Upscale + enhance manga pages (sharper text, screentones). Auto-upscales the panel in view. Works on whitelisted sites.",
   "permissions": [
     "activeTab",
+    "contextMenus",
     "scripting",
     "storage",
     "tabs",
