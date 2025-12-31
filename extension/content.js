@@ -56,6 +56,7 @@ let autoPending = false;
 let autoPendingPreload = false;
 let lastPreToastAt = 0;
 let lastPreToastMsg = '';
+let lastScrollAt = 0;
 
 const ENHANCED_PRELOAD_TTL_MS = 2 * 60 * 1000;
 const ENHANCED_PRELOAD_MAX_ENTRIES = 6;
@@ -73,11 +74,11 @@ function maybeStartHost(reason){
   const now = Date.now();
   if (now - lastHostStartAt < 8000) return;
   lastHostStartAt = now;
-  chrome.runtime.sendMessage({ type: 'HOST_START', reason: reason || 'auto' }).catch(()=>{});
+  chrome.runtime.sendMessage({ type: 'TRAY_START', reason: reason || 'auto' }).catch(()=>{});
 }
 
 function maybeStopHost(reason){
-  chrome.runtime.sendMessage({ type: 'HOST_STOP', reason: reason || 'auto' }).catch(()=>{});
+  chrome.runtime.sendMessage({ type: 'TRAY_STOP', reason: reason || 'auto' }).catch(()=>{});
 }
 
 function hostAllowed() {
@@ -1318,32 +1319,17 @@ async function processOnce(preload, showStatus){
     const shouldBurstLimit = settings.autoPanel && !manual;
     // On WeebCentral, only the "next" panel tends to exist in the DOM at any time.
     // Start pre-upscaling it immediately so scrolling to it feels instant.
-    let earlyPreload = null;
-    if (preload && isWeebCentral()) {
-      try{
-        const nextCount = clamp(Number(settings.preUpscaleCount||0), 0, 5);
-        const next = getNextCandidateImages(img, nextCount);
-        const first = next[0];
-        if (first) {
-          earlyPreload = (async ()=>{
-            // Let the current enhance request start first, then overlap pre-upscale.
-            await new Promise(r => setTimeout(r, 180));
-            await preloadAiForImage(first);
-            await applyEnhancedCacheIfReady(first);
-          })();
-        }
-      } catch {}
-    }
-
     await processImageElement(img);
     if (shouldBurstLimit && bumpAiBurstAndMaybeCooldown(true, preload)) return;
 
     if (preload){
+      // Heavy GPU work is expensive and can make scrolling feel laggy.
+      // If the user is actively scrolling, delay pre-upscales to the next tick.
+      if (!manual && (Date.now() - lastScrollAt) < 180) {
+        try { maybeToastPreloadProgress(img); } catch {}
+      } else {
       const nextCount = clamp(Number(settings.preUpscaleCount||0), 0, 5);
       const next = getNextCandidateImages(img, nextCount);
-      if (earlyPreload) {
-        try { await Promise.race([earlyPreload, new Promise(r => setTimeout(r, 6000))]); } catch {}
-      }
       for (const ni of next){
         try{
           // Pre-upscale: fetch enhanced outputs now, so the next panels are already swapped before you see them.
@@ -1362,6 +1348,7 @@ async function processOnce(preload, showStatus){
           }
           // ignore per-item
         }
+      }
       }
     }
 
@@ -1452,9 +1439,11 @@ function startAuto(){
   };
 
   let t = null;
+  const debounceMs = () => isWeebCentral() ? 120 : 260;
   const schedule = () => {
+    lastScrollAt = Date.now();
     clearTimeout(t);
-    t = setTimeout(onTick, 260);
+    t = setTimeout(onTick, debounceMs());
   };
 
   window.addEventListener('scroll', schedule, { passive: true });
@@ -1552,10 +1541,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       }
     })();
   }
-  if (msg?.type === 'HOST_START') {
+  if (msg?.type === 'HOST_START' || msg?.type === 'TRAY_START') {
     maybeStartHost(msg.reason || 'popup');
   }
-  if (msg?.type === 'HOST_STOP') {
+  if (msg?.type === 'HOST_STOP' || msg?.type === 'TRAY_STOP') {
     maybeStopHost(msg.reason || 'popup');
   }
 });

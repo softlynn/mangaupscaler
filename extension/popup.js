@@ -153,9 +153,9 @@ enabledToggle.addEventListener('click', async ()=>{
   await save({enabled:on});
   await sendCommand({type:'SETTINGS_UPDATED'});
   if (!on) {
-    await sendCommand({type:'HOST_STOP', reason:'disabled'});
+    await sendCommand({type:'TRAY_STOP', reason:'disabled'});
   } else {
-    await sendCommand({type:'HOST_START', reason:'enabled'});
+    await sendCommand({type:'TRAY_START', reason:'enabled'});
   }
   applyEnabledState(on);
 });

@@ -219,7 +219,9 @@ async function init(){
       idleShutdownMinutes: out.idleShutdownMinutes
     }).catch(()=>{});
     if (!out.enabled) {
-      chrome.runtime.sendMessage({ type:'HOST_STOP', reason:'disabled' }).catch(()=>{});
+      chrome.runtime.sendMessage({ type:'TRAY_STOP', reason:'disabled' }).catch(()=>{});
+    } else {
+      chrome.runtime.sendMessage({ type:'TRAY_START', reason:'enabled' }).catch(()=>{});
     }
     $('saveBtn').textContent = 'Saved!';
     setTimeout(()=> $('saveBtn').textContent = 'Save', 900);

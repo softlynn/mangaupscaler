@@ -30,7 +30,9 @@ chrome.runtime.onInstalled.addListener(async ()=>{
 });
 
 chrome.runtime.onSuspend.addListener(() => {
-  stopNativeHost('suspend');
+  // When Chrome closes, stop the tray + host so it doesn't linger.
+  stopTray().catch(()=>{});
+  stopNativeHost('suspend').catch(()=>{});
 });
 
 // MV3 background service worker
@@ -92,9 +94,11 @@ function ensureContextMenu() {
 
 chrome.runtime.onInstalled.addListener(() => {
   ensureContextMenu();
+  maybeAutoStartTray('install').catch(()=>{});
 });
 chrome.runtime.onStartup.addListener(() => {
   ensureContextMenu();
+  maybeAutoStartTray('startup').catch(()=>{});
 });
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
@@ -143,6 +147,19 @@ async function stopTray(){
     const resp = await chrome.runtime.sendNativeMessage(NATIVE_HOST, { cmd: 'tray_stop' });
     return !!resp?.ok;
   }catch{
+    return false;
+  }
+}
+
+async function maybeAutoStartTray(reason){
+  try{
+    const s = await chrome.storage.sync.get({ enabled: true });
+    if (!s?.enabled) return false;
+    await startTray();
+    // best-effort: ensure server is up (tray may already be running)
+    await ensureHostRunning(reason || 'auto');
+    return true;
+  } catch {
     return false;
   }
 }
@@ -202,19 +219,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
 
       if (msg?.type === 'HOST_START') {
+        await startTray();
         const ok = await ensureHostRunning(msg?.reason || 'manual');
         sendResponse({ ok });
         return;
       }
 
       if (msg?.type === 'HOST_STOP') {
-        const ok = await stopNativeHost(msg?.reason || 'manual');
+        await stopNativeHost(msg?.reason || 'manual');
+        const ok = await stopTray();
         sendResponse({ ok });
         return;
       }
 
       if (msg?.type === 'TRAY_START') {
         const ok = await startTray();
+        await ensureHostRunning(msg?.reason || 'tray_start');
         sendResponse({ ok });
         return;
       }
