@@ -263,7 +263,9 @@ function dataUrlToBytes(dataUrl) {
   if (!match) throw new Error('Invalid data URL');
   const contentType = match[1];
   const b64 = match[2];
+  if (!b64) throw new Error('Empty data URL');
   const bin = atob(b64);
+  if (!bin.length) throw new Error('Empty data URL');
   const len = bin.length;
   const bytes = new Uint8Array(len);
   for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);

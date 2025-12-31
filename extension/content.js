@@ -42,6 +42,8 @@ let busy = false;
 let observerStarted = false;
 let aiHostDownUntil = 0;
 let aiHostFailCount = 0;
+let aiBurstCount = 0;
+let aiBurstLastAt = 0;
 let cooldownRetryTimer = null;
 let cooldownRetryPreload = false;
 let cooldownNotifiedUntil = 0;
@@ -90,6 +92,81 @@ function log(...a){ console.log('[MangaUpscaler]', ...a); }
 
 function isHttpUrl(url){
   return typeof url === 'string' && (url.startsWith('http://') || url.startsWith('https://'));
+}
+
+function resolveUrlMaybe(url){
+  try{
+    return new URL(String(url), location.href).href;
+  } catch {
+    return String(url || '');
+  }
+}
+
+function isEmptyBase64DataUrl(url){
+  return typeof url === 'string' && /^data:[^;]+;base64,$/.test(url.trim());
+}
+
+function parseSrcsetUrls(srcset){
+  if (!srcset) return [];
+  try{
+    return String(srcset)
+      .split(',')
+      .map(p => p.trim())
+      .filter(Boolean)
+      .map(p => p.split(/\s+/)[0])
+      .map(u => resolveUrlMaybe(u))
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function getBestImageUrl(imgEl){
+  if (!imgEl) return '';
+  const out = [];
+  const seen = new Set();
+  const add = (u) => {
+    if (!u) return;
+    const v = resolveUrlMaybe(u);
+    if (!v) return;
+    if (seen.has(v)) return;
+    seen.add(v);
+    out.push(v);
+  };
+
+  add(imgEl.currentSrc);
+  add(imgEl.src);
+
+  // Common lazy-load attributes.
+  const attrs = [
+    'data-src',
+    'data-original',
+    'data-lazy-src',
+    'data-url',
+    'data-img',
+    'data-image',
+    'data-full',
+    'data-zoom-image',
+    'data-srcset'
+  ];
+  for (const a of attrs){
+    try{ add(imgEl.getAttribute(a)); }catch{}
+  }
+
+  // Try srcset (some sites keep the real URL there even when src is a placeholder data:).
+  try{
+    const srcset = imgEl.getAttribute('srcset') || '';
+    for (const u of parseSrcsetUrls(srcset)) add(u);
+  }catch{}
+
+  // Prefer real network URLs.
+  const http = out.find(isHttpUrl);
+  if (http) return http;
+  const blob = out.find(u => typeof u === 'string' && u.startsWith('blob:'));
+  if (blob) return blob;
+  const data = out.find(u => typeof u === 'string' && u.startsWith('data:') && !isEmptyBase64DataUrl(u));
+  if (data) return data;
+  return out[0] || '';
 }
 
 function waitForImageLoad(imgEl, timeoutMs=15000){
@@ -296,7 +373,12 @@ function findBestVisibleImage(){
 // ---------- Image fetch ----------
 async function fetchImageAsDataURL(url){
   // Already data URL?
-  if (url.startsWith('data:')) return url;
+  if (url.startsWith('data:')) {
+    const match = /^data:([^;]+);base64,(.*)$/.exec(url);
+    if (!match) throw new Error('Invalid data URL');
+    if (!match[2]) throw new Error('Empty data URL');
+    return url;
+  }
 
   // Blob URLs are page-scoped; fetch them in the content script.
   if (url.startsWith('blob:')) {
@@ -664,9 +746,41 @@ function scheduleAfterCooldown(preload){
   }, waitMs);
 }
 
+function bumpAiBurstAndMaybeCooldown(preload){
+  const now = Date.now();
+  // If it's been a while since the last successful enhance, reset the burst counter.
+  if (!aiBurstLastAt || (now - aiBurstLastAt) > 45000) {
+    aiBurstCount = 0;
+  }
+  aiBurstLastAt = now;
+  aiBurstCount += 1;
+
+  const limit = 5;
+  if (aiBurstCount < limit) return false;
+
+  aiBurstCount = 0;
+  aiHostDownUntil = now + 20000;
+  scheduleAfterCooldown(preload);
+
+  if (Date.now() > cooldownNotifiedUntil) {
+    cooldownNotifiedUntil = aiHostDownUntil;
+    makeToast('AI cooling down. will continue soon');
+  }
+
+  return true;
+}
+
 function getNextCandidateImages(currentImg, n){
   if (n <= 0) return [];
-  const imgs = Array.from(document.images || []).filter(i => i && i.src && i !== currentImg);
+  const imgs = Array.from(document.images || []).filter(i =>
+    i &&
+    i !== currentImg &&
+    i.complete &&
+    i.naturalWidth > 80 &&
+    i.naturalHeight > 80 &&
+    (i.currentSrc || i.src) &&
+    i.dataset?.muUpscaled !== '1'
+  );
   // Prefer those near/below the current image
   const curTop = currentImg.getBoundingClientRect().top + window.scrollY;
   const scored = imgs.map(i=>{
@@ -677,8 +791,8 @@ function getNextCandidateImages(currentImg, n){
 }
 
 async function processImageElement(imgEl){
-  const src = imgEl.currentSrc || imgEl.src;
-  if (!src) return;
+  const src = getBestImageUrl(imgEl);
+  if (!src) throw new Error('No usable image source');
 
   // If already upscaled by us, skip
   if (imgEl.dataset.muUpscaled === '1') return;
@@ -752,6 +866,15 @@ async function processOnce(preload, showStatus){
   if (!settings.enabled) return;
   if (!hostAllowed()) return;
 
+  if (settings.aiMode && Date.now() < aiHostDownUntil) {
+    scheduleAfterCooldown(preload);
+    if (Date.now() > cooldownNotifiedUntil) {
+      cooldownNotifiedUntil = aiHostDownUntil || (Date.now() + 20000);
+      makeToast('AI cooling down. will retry soon');
+    }
+    return;
+  }
+
   if (busy) return;
   busy = true;
   try{
@@ -761,14 +884,26 @@ async function processOnce(preload, showStatus){
     const img = findBestVisibleImage();
     if (!img) { makeToast('No panel found'); return; }
 
+    const shouldBurstLimit = settings.aiMode && (settings.autoPanel || preload);
     await processImageElement(img);
+    if (shouldBurstLimit && bumpAiBurstAndMaybeCooldown(preload)) return;
 
     if (preload){
       const next = getNextCandidateImages(img, clamp(Number(settings.preUpscaleCount||0), 0, 4));
       for (const ni of next){
         try{
           await processImageElement(ni);
+          if (shouldBurstLimit && bumpAiBurstAndMaybeCooldown(preload)) return;
         }catch(e){
+          const msg = String(e?.message || e || '');
+          if (settings.aiMode && msg.includes('AI host cooldown')) {
+            scheduleAfterCooldown(preload);
+            if (Date.now() > cooldownNotifiedUntil) {
+              cooldownNotifiedUntil = aiHostDownUntil || (Date.now() + 20000);
+              makeToast('AI cooling down. will retry soon');
+            }
+            return;
+          }
           // ignore per-item
         }
       }
