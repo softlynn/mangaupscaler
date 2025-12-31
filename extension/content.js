@@ -48,6 +48,8 @@ let io = null;
 let visibleScores = new Map(); // Map<img, intersectionArea>
 let lastHostStartAt = 0;
 let canvasOverlays = new WeakMap(); // WeakMap<img, { wrapper: HTMLElement, canvas: HTMLCanvasElement }>
+let preloadStatus = { target: 0, preloaded: 0, prefetched: 0, updatedAt: 0, currentUrl: '' };
+let pagePrefetch = new Map(); // url -> untilMs
 
 // ---------- Settings ----------
 async function loadSettings() {
@@ -762,6 +764,60 @@ function restoreAllUpscaledImages(){
   } catch {}
 }
 
+function restorePreloadPageTweaks(){
+  try{
+    const imgs = Array.from(document.images || []);
+    for (const img of imgs){
+      const orig = img?.dataset?.muPageOriginalSrc;
+      if (!orig) continue;
+      try { img.src = orig; } catch {}
+      try { delete img.dataset.muPageOriginalSrc; } catch {}
+    }
+  } catch {}
+}
+
+function isWeebCentral(){
+  try { return location.hostname === 'weebcentral.com' || location.hostname.endsWith('.weebcentral.com'); } catch { return false; }
+}
+
+function getPreloadKeyForUrl(url){
+  const scale = clamp(Number(settings.scale || 3), 2, 4);
+  const quality = String(settings.aiQuality || 'balanced');
+  const format = 'webp';
+  return `${url}::s=${scale}::q=${quality}::f=${format}`;
+}
+
+function touchPagePreload(imgEl, url){
+  // Try to make upcoming panels load visually sooner without swapping anything to blob/data.
+  // 1) Prefer browser-native lazyload hints.
+  try { imgEl.loading = 'eager'; } catch {}
+  try { imgEl.decoding = 'async'; } catch {}
+  try { imgEl.fetchPriority = 'high'; } catch {}
+
+  // 2) If this <img> is still a placeholder, set its src to the real URL so the page shows it.
+  // Only do this for empty base64 placeholders to avoid fighting the site's own loader.
+  try{
+    const cur = String(imgEl.currentSrc || imgEl.src || '');
+    if (isEmptyBase64DataUrl(cur) && isHttpUrl(url)) {
+      imgEl.dataset.muPageOriginalSrc = cur;
+      imgEl.src = url;
+    }
+  } catch {}
+}
+
+function prefetchUrl(url){
+  if (!isHttpUrl(url)) return;
+  const until = pagePrefetch.get(url) || 0;
+  if (until && Date.now() < until) return;
+  pagePrefetch.set(url, Date.now() + 60000);
+  try{
+    const im = new Image();
+    im.decoding = 'async';
+    im.referrerPolicy = 'no-referrer';
+    im.src = url;
+  } catch {}
+}
+
 function scheduleAfterCooldown(preload){
   cooldownRetryPreload = !!preload;
   if (cooldownRetryTimer) return;
@@ -804,8 +860,8 @@ function getNextCandidateImages(currentImg, n){
   const curTop = curRect.top + window.scrollY;
   const curW = Math.max(1, curRect.width || currentImg.naturalWidth || 0);
   const curH = Math.max(1, curRect.height || currentImg.naturalHeight || 0);
-  const minW = Math.max(220, curW * 0.55);
-  const minH = Math.max(220, curH * 0.55);
+  const minW = Math.max(isWeebCentral() ? 320 : 220, curW * 0.55);
+  const minH = Math.max(isWeebCentral() ? 320 : 220, curH * 0.55);
 
   const imgs = Array.from(document.images || []).filter(i => {
     if (!i || i === currentImg) return false;
@@ -817,7 +873,8 @@ function getNextCandidateImages(currentImg, n){
     const top = r.top + window.scrollY;
     // keep candidates in a reasonable window below/around the current panel
     if (top < (curTop - window.innerHeight * 0.5)) return false;
-    if (top > (curTop + window.innerHeight * 8.0)) return false;
+    const maxScreens = isWeebCentral() ? 5.0 : 8.0;
+    if (top > (curTop + window.innerHeight * maxScreens)) return false;
     return true;
   });
 
@@ -852,6 +909,10 @@ async function preloadAiForImage(imgEl){
   imgEl.dataset.muPreloadKey = key;
   imgEl.dataset.muPreloadUntil = String(Date.now() + 20000);
 
+  // Preload the actual page image too (so scrolling doesn't show blank placeholders).
+  prefetchUrl(src);
+  touchPagePreload(imgEl, src);
+
   maybeStartHost('preload');
   const resp = await chrome.runtime.sendMessage({
     type: 'AI_PRELOAD',
@@ -863,6 +924,29 @@ async function preloadAiForImage(imgEl){
   if (!resp?.ok) throw new Error(resp?.error || 'Preload failed');
   if (resp.hostError) throw new Error(resp.hostError);
   return true;
+}
+
+function computePreloadStatus(currentImg){
+  const target = clamp(Number(settings.preUpscaleCount || 0), 0, 5);
+  const next = getNextCandidateImages(currentImg, target);
+  let preloaded = 0;
+  let prefetched = 0;
+  for (const ni of next){
+    const url = getBestImageUrl(ni);
+    if (!url || !isHttpUrl(url)) continue;
+    const key = getPreloadKeyForUrl(url);
+    const ok = (String(ni.dataset?.muPreloadKey || '') === key) && (Number(ni.dataset?.muPreloadUntil || 0) > Date.now());
+    if (ok) preloaded++;
+    const u2 = pagePrefetch.get(url) || 0;
+    if (u2 && Date.now() < u2) prefetched++;
+  }
+  preloadStatus = {
+    target,
+    preloaded,
+    prefetched,
+    updatedAt: Date.now(),
+    currentUrl: String(getBestImageUrl(currentImg) || '')
+  };
 }
 
 async function processImageElement(imgEl){
@@ -991,7 +1075,8 @@ async function processOnce(preload, showStatus){
     if (shouldBurstLimit && bumpAiBurstAndMaybeCooldown(true, preload)) return;
 
     if (preload){
-      const next = getNextCandidateImages(img, clamp(Number(settings.preUpscaleCount||0), 0, 5));
+      const nextCount = clamp(Number(settings.preUpscaleCount||0), 0, 5);
+      const next = getNextCandidateImages(img, nextCount);
       for (const ni of next){
         try{
           // AI preload: warm the host disk cache without touching page DOM (prevents flicker + CSP issues).
@@ -1012,6 +1097,9 @@ async function processOnce(preload, showStatus){
         }
       }
     }
+
+    // Update status after each cycle (so popup can show progress).
+    try { computePreloadStatus(img); } catch {}
   } catch(e){
     log('Enhance failed:', e);
     const msg = String(e?.message || e || '').slice(0, 120);
@@ -1119,12 +1207,23 @@ function startAuto(){
 }
 
 // ---------- Messaging ----------
-chrome.runtime.onMessage.addListener((msg) => {
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  // Allow returning a value for specific messages.
+  if (msg?.type === 'GET_PRELOAD_STATUS') {
+    try{
+      const img = findBestVisibleImage();
+      if (img) computePreloadStatus(img);
+    } catch {}
+    try { sendResponse(preloadStatus); } catch {}
+    return true;
+  }
+
   if (msg?.type === 'SETTINGS_UPDATED') {
     loadSettings().then(()=>{
       if (!settings.enabled || !hostAllowed()) {
         maybeStopHost('settings_update');
         restoreAllUpscaledImages();
+        restorePreloadPageTweaks();
       } else {
         maybeStartHost('settings_update');
       }

@@ -24,6 +24,7 @@ const supportLink = $('supportLink');
 const openSettings = $('openSettings');
 const aiQuality = $('aiQuality');
 const siteStatus = $('siteStatus');
+const preStatus = $('preStatus');
 
 let currentHost = null;
 let siteLocked = false;
@@ -100,6 +101,7 @@ async function load(){
   const allowed = isHostAllowed(currentHost, wh);
   applySiteLock(allowed);
   applyEnabledState(!!s.enabled);
+  refreshPreStatus().catch(()=>{});
 
   siteLink.addEventListener('click', (e)=>{ e.preventDefault(); chrome.tabs.create({url:'https://softlynn.carrd.co/#'}); });
   openSettings.addEventListener('click', ()=>{
@@ -119,6 +121,23 @@ async function sendCommand(cmd){
   const tab = await getActiveTab();
   if (!tab?.id) return;
   await chrome.tabs.sendMessage(tab.id, cmd).catch(()=>{});
+}
+
+async function refreshPreStatus(){
+  try{
+    const tab = await getActiveTab();
+    if (!tab?.id) return;
+    const resp = await chrome.tabs.sendMessage(tab.id, { type: 'GET_PRELOAD_STATUS' }).catch(()=>null);
+    if (!preStatus) return;
+    if (!resp || typeof resp !== 'object') { preStatus.textContent = ''; return; }
+    const t = Number(resp.target || 0);
+    const p = Number(resp.preloaded || 0);
+    const f = Number(resp.prefetched || 0);
+    if (t <= 0) { preStatus.textContent = ''; return; }
+    preStatus.textContent = `Preloaded ahead: ${p}/${t}  •  Page prefetched: ${f}/${t}`;
+  } catch {
+    if (preStatus) preStatus.textContent = '';
+  }
 }
 
 enabledToggle.addEventListener('click', async ()=>{
@@ -173,6 +192,7 @@ pre.addEventListener('input', async ()=>{
   runPrimary.textContent = `Enhance + Preload ${Number(pre.value)}`;
   await save({preUpscaleCount: Number(pre.value)});
   await sendCommand({type:'SETTINGS_UPDATED'});
+  refreshPreStatus().catch(()=>{});
 });
 
 run.addEventListener('click', async ()=>{
