@@ -6,6 +6,11 @@
 
 MangaUpscaler is a Chrome extension + local AI host for manga enhancement.
 It detects the manga panel in view and swaps it with an AI-upscaled version from your PC (Real-ESRGAN + MangaJaNai / IllustrationJaNai).
+#NOTE!! This was developed with help of codex 5.2 and for personal use, it is not guaranteed to work on every system, or every site. It has been tested with the following Nvidia GPUs:
+- Nvidia RTX 5060 Ti 16gb
+
+Plugin should work on most rtx nvidia gpus, but not guaranteed.
+Chromium bases browsers are best, but firefox/brave may need some tweaking.
 
 ## ✨ Features
 - 🎨 Auto-detect grayscale vs color panels
