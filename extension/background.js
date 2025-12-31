@@ -39,6 +39,41 @@ const BADGE_BG = '#ff7fc8';
 const NATIVE_HOST = 'com.softlynn.manga_upscaler';
 
 let hostOkUntil = 0;
+const AI_STREAM_CHUNK_SIZE = 256 * 1024; // 256KB
+const aiStreamStore = new Map(); // id -> { chunks: ArrayBuffer[], byteLength, contentType, model, hostError, elapsedMs, createdAt }
+
+function newStreamId(){
+  try{
+    if (crypto?.randomUUID) return crypto.randomUUID();
+  } catch {}
+  return `${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
+}
+
+function splitArrayBuffer(buffer, chunkSize){
+  const chunks = [];
+  const u8 = new Uint8Array(buffer);
+  for (let i = 0; i < u8.length; i += chunkSize) {
+    chunks.push(u8.slice(i, i + chunkSize).buffer);
+  }
+  return chunks;
+}
+
+function storeAiStream({ buffer, contentType, model, hostError, elapsedMs }){
+  const id = newStreamId();
+  const chunks = splitArrayBuffer(buffer, AI_STREAM_CHUNK_SIZE);
+  const entry = {
+    chunks,
+    byteLength: buffer.byteLength || 0,
+    contentType: contentType || 'application/octet-stream',
+    model: model || '',
+    hostError: hostError || '',
+    elapsedMs: Number(elapsedMs || 0),
+    createdAt: Date.now()
+  };
+  aiStreamStore.set(id, entry);
+  setTimeout(() => aiStreamStore.delete(id), 60_000);
+  return { id, chunkCount: chunks.length };
+}
 
 function ensureContextMenu() {
   try{
@@ -227,12 +262,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const hostError = resp.headers.get('X-MU-Host-Error') || '';
         const blob = await resp.blob();
         const buffer = await blob.arrayBuffer();
-        // Some Chrome builds/extensions have flaky ArrayBuffer transfer over sendMessage for large payloads.
-        // Also include base64 as a robust fallback transport.
-        const b64 = arrayBufferToBase64(buffer);
         const contentType = (resp.headers.get('content-type') || blob.type || 'image/png').split(';')[0];
         const elapsedMs = Date.now() - t0;
-        sendResponse({ ok: true, buffer, b64, byteLength: buffer.byteLength, contentType, model, hostError, elapsedMs });
+        // Large payloads sent via sendMessage can be flaky or truncated. Stream in chunks instead.
+        const stream = storeAiStream({ buffer, contentType, model, hostError, elapsedMs });
+        sendResponse({
+          ok: true,
+          streamId: stream.id,
+          chunkCount: stream.chunkCount,
+          byteLength: buffer.byteLength,
+          contentType,
+          model,
+          hostError,
+          elapsedMs
+        });
         return;
       }
 
@@ -278,6 +321,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         const elapsedMs = Date.now() - t0;
         sendResponse({ ok: true, model, hostError, elapsedMs });
+        return;
+      }
+
+      if (msg?.type === 'AI_STREAM_CHUNK') {
+        const { streamId, index } = msg || {};
+        const entry = aiStreamStore.get(String(streamId || ''));
+        if (!entry) throw new Error('Unknown stream');
+        const i = Number(index || 0);
+        if (!Number.isFinite(i) || i < 0) throw new Error('Invalid chunk index');
+        const chunk = entry.chunks[i];
+        if (!chunk) throw new Error('Chunk not found');
+        sendResponse({ ok: true, chunk, index: i, last: (i === entry.chunks.length - 1) });
+        return;
+      }
+
+      if (msg?.type === 'AI_STREAM_DELETE') {
+        const { streamId } = msg || {};
+        aiStreamStore.delete(String(streamId || ''));
+        sendResponse({ ok: true });
         return;
       }
 
@@ -373,14 +435,4 @@ function dataUrlToBytes(dataUrl) {
   const bytes = new Uint8Array(len);
   for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
   return { bytes, contentType };
-}
-
-function arrayBufferToBase64(buffer){
-  const bytes = new Uint8Array(buffer);
-  let binary = '';
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
-  }
-  return btoa(binary);
 }

@@ -6,7 +6,7 @@
 
 MangaUpscaler is a Chrome extension + local AI host for manga enhancement.
 It detects the manga panel in view and swaps it with an AI-upscaled version from your PC (Real-ESRGAN + MangaJaNai / IllustrationJaNai).
-# NOTE
+## NOTE
 This was developed with help of codex 5.2 and for personal use, it is not guaranteed to work on every system, or every site. It has been tested with the following Nvidia GPUs:
 - Nvidia RTX 5060 Ti 16gb
 
@@ -22,8 +22,8 @@ Chromium bases browsers are best, but firefox/brave may need some tweaking.
 - 🖥️ Tray app with logs + cache tools (green dot while enhancing)
 
 ## ⬇️ Downloads (Windows)
-- 🖥️ Host installer: [MangaUpscalerHostSetup.exe](https://github.com/softlynn/mangaupscaler/releases/download/v0.2.1-alpha/MangaUpscalerHostSetup.exe)
-- 🧩 Chrome extension: [MangaUpscalerExtension.zip](https://github.com/softlynn/mangaupscaler/releases/download/v0.2.1-alpha/MangaUpscalerExtension.zip)
+- 🖥️ Host installer: [MangaUpscalerHostSetup.exe](https://github.com/softlynn/mangaupscaler/releases/download/v0.2.2-alpha/MangaUpscalerHostSetup.exe)
+- 🧩 Chrome extension: [MangaUpscalerExtension.zip](https://github.com/softlynn/mangaupscaler/releases/download/v0.2.2-alpha/MangaUpscalerExtension.zip)
 
 ## 🧰 Install (Windows, recommended)
 ### 1) Add the extension (unpacked) 🧩

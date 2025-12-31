@@ -656,10 +656,28 @@ async function enhanceViaHost(srcUrl, opts={}){
   if (resp.hostError) {
     throw new Error(resp.hostError);
   }
-  if (resp.buffer || resp.b64) {
-    const ab = normalizeToArrayBuffer(resp.buffer) || (resp.b64 ? base64ToArrayBuffer(resp.b64) : null);
-    if (!ab) throw new Error('AI returned invalid payload');
-    const blob = new Blob([ab], { type: resp.contentType || 'image/png' });
+  // Prefer chunked streaming to avoid sendMessage truncation on large images.
+  if (resp.streamId) {
+    const streamId = String(resp.streamId || '');
+    const chunkCount = Number(resp.chunkCount || 0);
+    const total = Number(resp.byteLength || 0);
+    const contentType = String(resp.contentType || 'image/png');
+    if (!streamId || !chunkCount || !total) throw new Error('AI returned invalid stream');
+
+    const out = new Uint8Array(total);
+    let offset = 0;
+    for (let i = 0; i < chunkCount; i++) {
+      const r = await chrome.runtime.sendMessage({ type: 'AI_STREAM_CHUNK', streamId, index: i });
+      if (!r?.ok) throw new Error(r?.error || 'Stream chunk failed');
+      const ab = normalizeToArrayBuffer(r.chunk);
+      if (!ab) throw new Error('Invalid stream chunk');
+      const u8 = new Uint8Array(ab);
+      out.set(u8, offset);
+      offset += u8.length;
+    }
+    chrome.runtime.sendMessage({ type: 'AI_STREAM_DELETE', streamId }).catch(()=>{});
+
+    const blob = new Blob([out.buffer.slice(0, offset)], { type: contentType });
     if (!blob.size) throw new Error('AI returned empty image');
     const objectUrl = URL.createObjectURL(blob);
     return {
@@ -668,9 +686,20 @@ async function enhanceViaHost(srcUrl, opts={}){
       model: resp.model || '',
       elapsedMs: resp.elapsedMs || 0,
       blob,
-      contentType: (resp.contentType || blob.type || 'image/png')
+      contentType: contentType
     };
   }
+
+  // Back-compat: allow direct buffer (small results).
+  if (resp.buffer) {
+    const ab = normalizeToArrayBuffer(resp.buffer);
+    if (!ab) throw new Error('AI returned invalid payload');
+    const blob = new Blob([ab], { type: resp.contentType || 'image/png' });
+    if (!blob.size) throw new Error('AI returned empty image');
+    const objectUrl = URL.createObjectURL(blob);
+    return { src: objectUrl, isObjectUrl: true, model: resp.model || '', elapsedMs: resp.elapsedMs || 0, blob, contentType: (resp.contentType || blob.type || 'image/png') };
+  }
+
   return { src: resp.dataUrl, isObjectUrl: false, model: resp.model || '', elapsedMs: resp.elapsedMs || 0 };
 }
 
@@ -772,6 +801,13 @@ function restorePreloadPageTweaks(){
       if (!orig) continue;
       try { img.src = orig; } catch {}
       try { delete img.dataset.muPageOriginalSrc; } catch {}
+      try{
+        const ss = img?.dataset?.muPageOriginalSrcset;
+        if (typeof ss === 'string') {
+          img.setAttribute('srcset', ss);
+        }
+      } catch {}
+      try { delete img.dataset.muPageOriginalSrcset; } catch {}
     }
   } catch {}
 }
@@ -795,11 +831,27 @@ function touchPagePreload(imgEl, url){
   try { imgEl.fetchPriority = 'high'; } catch {}
 
   // 2) If this <img> is still a placeholder, set its src to the real URL so the page shows it.
-  // Only do this for empty base64 placeholders to avoid fighting the site's own loader.
+  // Only do this for obvious placeholders to avoid fighting the site's own loader.
   try{
     const cur = String(imgEl.currentSrc || imgEl.src || '');
-    if (isEmptyBase64DataUrl(cur) && isHttpUrl(url)) {
-      imgEl.dataset.muPageOriginalSrc = cur;
+    const isPlaceholder =
+      !cur ||
+      cur === 'about:blank' ||
+      isEmptyBase64DataUrl(cur) ||
+      cur.startsWith('data:image/gif') ||
+      cur.includes('transparent') ||
+      cur.includes('placeholder');
+
+    if (isPlaceholder && isHttpUrl(url)) {
+      if (!imgEl.dataset.muPageOriginalSrc) imgEl.dataset.muPageOriginalSrc = cur;
+      // Clear srcset if it only contains placeholder entries.
+      try{
+        const ss = String(imgEl.getAttribute('srcset') || '');
+        if (ss && !ss.includes('http://') && !ss.includes('https://')) {
+          imgEl.dataset.muPageOriginalSrcset = ss;
+          imgEl.setAttribute('srcset', '');
+        }
+      } catch {}
       imgEl.src = url;
     }
   } catch {}

@@ -28,6 +28,7 @@ const preStatus = $('preStatus');
 
 let currentHost = null;
 let siteLocked = false;
+let preStatusTimer = null;
 
 function isHostAllowed(host, whitelist){
   if (!host) return false;
@@ -102,6 +103,11 @@ async function load(){
   applySiteLock(allowed);
   applyEnabledState(!!s.enabled);
   refreshPreStatus().catch(()=>{});
+  try{
+    if (preStatusTimer) clearInterval(preStatusTimer);
+    preStatusTimer = setInterval(() => refreshPreStatus().catch(()=>{}), 900);
+    window.addEventListener('beforeunload', () => { try { clearInterval(preStatusTimer); } catch {} }, { once: true });
+  } catch {}
 
   siteLink.addEventListener('click', (e)=>{ e.preventDefault(); chrome.tabs.create({url:'https://softlynn.carrd.co/#'}); });
   openSettings.addEventListener('click', ()=>{
