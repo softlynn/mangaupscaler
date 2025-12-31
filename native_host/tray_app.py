@@ -140,7 +140,8 @@ class HostController:
 
   def stop(self):
     try:
-      urllib.request.urlopen(SHUTDOWN_URL, timeout=1)
+      req = urllib.request.Request(SHUTDOWN_URL, data=b"", method="POST")
+      urllib.request.urlopen(req, timeout=1)
     except Exception:
       pass
     if self.proc:

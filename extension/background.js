@@ -181,6 +181,40 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return;
       }
 
+      if (msg?.type === 'AI_PRELOAD') {
+        const { sourceUrl, scale, quality, format } = msg || {};
+        const t0 = Date.now();
+        if (!sourceUrl) throw new Error('Missing sourceUrl');
+        if (!await ensureHostRunning('preload')) throw new Error('AI host not running');
+        const qs = new URLSearchParams();
+        if (typeof scale === 'number') qs.set('scale', String(scale));
+        if (quality) qs.set('quality', String(quality));
+        if (format) qs.set('format', String(format));
+        qs.set('url', sourceUrl);
+        const url = `${AI_HOST}/enhance?${qs.toString()}`;
+        const resp = await fetch(url, { cache: 'no-store' });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const model = resp.headers.get('X-MU-Model') || '';
+        const hostError = resp.headers.get('X-MU-Host-Error') || '';
+        // Drain body without transferring it across sendMessage.
+        try{
+          if (resp.body && resp.body.getReader) {
+            const reader = resp.body.getReader();
+            while (true) {
+              const { done } = await reader.read();
+              if (done) break;
+            }
+          } else {
+            await resp.arrayBuffer();
+          }
+        } catch {
+          // ignore drain errors
+        }
+        const elapsedMs = Date.now() - t0;
+        sendResponse({ ok: true, model, hostError, elapsedMs });
+        return;
+      }
+
       if (msg?.type === 'AI_ENHANCE_URL') {
         const { sourceUrl, scale, quality, format } = msg || {};
         if (!sourceUrl) throw new Error('Missing sourceUrl');

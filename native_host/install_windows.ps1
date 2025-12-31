@@ -9,6 +9,7 @@ param(
   [switch]$ModelsOnly,
   [switch]$SkipNativeMessaging,
   [switch]$NoPause,
+  [switch]$Force,
   [string]$CudaIndexUrl = "https://download.pytorch.org/whl/cu121",
   [string]$LogPath = ""
 )
@@ -362,24 +363,81 @@ if ($runTorch) { $runPhaseCount += 1; $phaseName += "torch " }
 if ($runModels) { $runPhaseCount += 1; $phaseName += "models " }
 Write-Log ("Requested phases: " + ($phaseName.Trim()))
 
+function Test-VenvImports {
+  param(
+    [string]$PythonExe,
+    [string[]]$Modules
+  )
+  $mods = $Modules -join ","
+  $script = @"
+import sys
+mods = sys.argv[1].split(',') if len(sys.argv) > 1 else []
+for m in mods:
+    __import__(m)
+print('ok')
+"@
+  $p = Write-TempPythonScript -Name "mu_import_check.py" -Content $script
+  try {
+    $out = & $PythonExe $p $mods 2>&1
+    Write-LogLines -Lines $out
+    return ($LASTEXITCODE -eq 0) -and (($out | Select-Object -Last 1) -match 'ok')
+  } catch {
+    Write-Log ("Import check failed: " + $_.Exception.Message)
+    return $false
+  } finally {
+    try { Remove-Item $p -Force } catch { }
+  }
+}
+
+function Test-ModelsPresent {
+  $modelsDir = Join-Path $PSScriptRoot "models"
+  if (-not (Test-Path $modelsDir)) { return $false }
+  try {
+    $pth = Get-ChildItem -Path $modelsDir -Recurse -Filter "*.pth" -ErrorAction SilentlyContinue | Select-Object -First 1
+    return ($null -ne $pth)
+  } catch {
+    return $false
+  }
+}
+
 if ($runDeps) {
   Write-Log "Phase: dependencies"
-  Write-Host "Installing Python dependencies... (this can take several minutes)"
-  Write-Log "Installing Python dependencies."
-  Invoke-Logged -Label "pip upgrade" -Command $venvPython -CmdArgs @("-m","pip","install","--disable-pip-version-check","--upgrade","pip")
-  Write-Log "Installing requirements (excluding torch packages)."
-  $reqPath = Join-Path $PSScriptRoot "requirements.txt"
-  $tmpReq = Write-TempRequirements -SourcePath $reqPath
-  Invoke-Logged -Label "pip requirements" -Command $venvPython -CmdArgs @("-m","pip","install","--disable-pip-version-check","-r",$tmpReq)
-  if ($tmpReq -and (Test-Path $tmpReq)) {
-    try { Remove-Item $tmpReq -Force } catch { }
+  if (-not $Force -and (Test-VenvImports -PythonExe $venvPython -Modules @("PIL","requests","realesrgan","basicsr"))) {
+    Write-Log "Dependencies already installed; skipping Phase: dependencies."
+  } else {
+    Write-Host "Installing Python dependencies... (this can take several minutes)"
+    Write-Log "Installing Python dependencies."
+    Invoke-Logged -Label "pip upgrade" -Command $venvPython -CmdArgs @("-m","pip","install","--disable-pip-version-check","--upgrade","pip")
+    Write-Log "Installing requirements (excluding torch packages)."
+    $reqPath = Join-Path $PSScriptRoot "requirements.txt"
+    $tmpReq = Write-TempRequirements -SourcePath $reqPath
+    Invoke-Logged -Label "pip requirements" -Command $venvPython -CmdArgs @("-m","pip","install","--disable-pip-version-check","-r",$tmpReq)
+    if ($tmpReq -and (Test-Path $tmpReq)) {
+      try { Remove-Item $tmpReq -Force } catch { }
+    }
   }
 }
 
 # CUDA Torch build (adjust CudaIndexUrl if needed)
 if ($runTorch) {
   Write-Log "Phase: torch"
-  Write-Host "Installing PyTorch (CUDA)... (this can take several minutes)"
+  if (-not $Force) {
+    try {
+      $chk = & $venvPython -c "import torch; print(int(torch.cuda.is_available())); print(torch.version.cuda or '')" 2>&1
+      Write-LogLines -Lines $chk
+      $okLine = ($chk | Select-Object -First 1)
+      if ($okLine -match '^1$') {
+        Write-Log "Torch CUDA already available; skipping Phase: torch."
+        $runTorch = $false
+      }
+    } catch {
+      # continue
+    }
+  }
+  if (-not $runTorch) {
+    # no-op
+  } else {
+    Write-Host "Installing PyTorch (CUDA)... (this can take several minutes)"
   Write-Log "GPU preflight check"
   $nvidiaSmiPath = Find-NvidiaSmi
   $nvidiaGpuName = $null
@@ -566,6 +624,7 @@ print(json.dumps(info))
       throw $msg
     }
   }
+  }
 }
 
 if (-not $phaseOnly -and -not $SkipNativeMessaging) {
@@ -607,11 +666,15 @@ if (-not $phaseOnly -and -not $SkipNativeMessaging) {
 
 # Optional model download (official MangaJaNai release)
 if ($runModels) {
-  Write-Host "Downloading MangaJaNai models... (this can take a while)"
-  Write-Log "Downloading MangaJaNai models."
-  $dlArgs = @("host_server.py", "--download-models")
-  if ($AllowDat2) { $dlArgs += "--allow-dat2" }
-  Invoke-Logged -Label "model download" -Command $venvPython -CmdArgs $dlArgs
+  if (-not $Force -and (Test-ModelsPresent)) {
+    Write-Log "Models already present; skipping Phase: models."
+  } else {
+    Write-Host "Downloading MangaJaNai models... (this can take a while)"
+    Write-Log "Downloading MangaJaNai models."
+    $dlArgs = @("host_server.py", "--download-models")
+    if ($AllowDat2) { $dlArgs += "--allow-dat2" }
+    Invoke-Logged -Label "model download" -Command $venvPython -CmdArgs $dlArgs
+  }
 }
 
 if ($phaseOnly) {

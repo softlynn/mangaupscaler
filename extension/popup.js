@@ -106,6 +106,7 @@ async function load(){
 
   pre.value = String(s.preUpscaleCount ?? 0);
   preN.textContent = String(s.preUpscaleCount ?? 0);
+  runPrimary.textContent = `Enhance + Preload ${Number(s.preUpscaleCount ?? 0)}`;
 
   sharp.value = String(s.sharpenStrength ?? 0.4);
   sharpVal.textContent = Number(s.sharpenStrength ?? 0.4).toFixed(2);
@@ -198,6 +199,7 @@ scale.addEventListener('change', async ()=>{
 pre.addEventListener('input', async ()=>{
   if (siteLocked) return;
   preN.textContent = pre.value;
+  runPrimary.textContent = `Enhance + Preload ${Number(pre.value)}`;
   await save({preUpscaleCount: Number(pre.value)});
   await sendCommand({type:'SETTINGS_UPDATED'});
 });

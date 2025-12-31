@@ -141,7 +141,8 @@ def _start_host() -> dict:
 
 def _stop_host() -> dict:
   try:
-    urllib.request.urlopen(SHUTDOWN_URL, timeout=1)
+    req = urllib.request.Request(SHUTDOWN_URL, data=b"", method="POST")
+    urllib.request.urlopen(req, timeout=1)
   except Exception:
     pass
   time.sleep(0.2)

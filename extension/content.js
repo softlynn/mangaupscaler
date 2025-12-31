@@ -394,18 +394,14 @@ function sparkle(rect){
   setTimeout(()=>root.remove(), 900);
 }
 
-function showOverlay(rect, text){
+function showOverlay(_rect, text){
   const root = document.createElement('div');
   root.style.cssText = `
     position: fixed;
-    left: ${Math.max(0, rect.left)}px;
-    top: ${Math.max(0, rect.top)}px;
-    width: ${Math.max(0, rect.width)}px;
-    height: ${Math.max(0, rect.height)}px;
+    left: 18px;
+    bottom: 64px;
     z-index: 2147483647;
     pointer-events: none;
-    display: grid;
-    place-items: center;
   `;
   root.innerHTML = `
     <div style="
@@ -942,15 +938,13 @@ function bumpAiBurstAndMaybeCooldown(preload){
 
 function getNextCandidateImages(currentImg, n){
   if (n <= 0) return [];
-  const imgs = Array.from(document.images || []).filter(i =>
-    i &&
-    i !== currentImg &&
-    i.complete &&
-    i.naturalWidth > 80 &&
-    i.naturalHeight > 80 &&
-    (i.currentSrc || i.src) &&
-    i.dataset?.muUpscaled !== '1'
-  );
+  const imgs = Array.from(document.images || []).filter(i => {
+    if (!i || i === currentImg) return false;
+    if (i.dataset?.muUpscaled === '1') return false;
+    const u = getBestImageUrl(i);
+    if (!u || isEmptyBase64DataUrl(u)) return false;
+    return true;
+  });
   // Prefer those near/below the current image
   const curTop = currentImg.getBoundingClientRect().top + window.scrollY;
   const scored = imgs.map(i=>{
@@ -958,6 +952,33 @@ function getNextCandidateImages(currentImg, n){
     return { i, d: Math.abs(top - curTop), below: top >= curTop ? 0 : 1 };
   }).sort((a,b)=> (a.below - b.below) || (a.d - b.d));
   return scored.slice(0, n).map(x=>x.i);
+}
+
+async function preloadAiForImage(imgEl){
+  if (!imgEl) return false;
+  const until = Number(imgEl.dataset?.muPreloadUntil || 0);
+  if (until && Date.now() < until) return true;
+
+  const src = getBestImageUrl(imgEl);
+  if (!src || !isHttpUrl(src) || isEmptyBase64DataUrl(src)) return false;
+
+  imgEl.dataset.muPreloadUntil = String(Date.now() + 60000);
+
+  const scale = clamp(Number(settings.scale || 3), 2, 4);
+  const quality = String(settings.aiQuality || 'balanced');
+  const format = 'webp';
+
+  maybeStartHost('preload');
+  const resp = await chrome.runtime.sendMessage({
+    type: 'AI_PRELOAD',
+    sourceUrl: src,
+    scale,
+    quality,
+    format
+  });
+  if (!resp?.ok) throw new Error(resp?.error || 'Preload failed');
+  if (resp.hostError) throw new Error(resp.hostError);
+  return true;
 }
 
 async function processImageElement(imgEl){
@@ -1089,7 +1110,9 @@ async function processOnce(preload, showStatus){
     const img = findBestVisibleImage();
     if (!img) { makeToast('No panel found'); return; }
 
-    const shouldBurstLimit = settings.aiMode && (settings.autoPanel || preload);
+    // Burst cooldown is only for auto mode; manual Enhance/Preload should do what the user asked.
+    const manual = !!showStatus;
+    const shouldBurstLimit = settings.aiMode && settings.autoPanel && !manual;
     await processImageElement(img);
     if (shouldBurstLimit && bumpAiBurstAndMaybeCooldown(preload)) return;
 
@@ -1097,7 +1120,12 @@ async function processOnce(preload, showStatus){
       const next = getNextCandidateImages(img, clamp(Number(settings.preUpscaleCount||0), 0, 4));
       for (const ni of next){
         try{
-          await processImageElement(ni);
+          if (settings.aiMode) {
+            // AI preload: warm the host disk cache without touching page DOM (prevents flicker + CSP issues).
+            await preloadAiForImage(ni);
+          } else {
+            await processImageElement(ni);
+          }
           if (shouldBurstLimit && bumpAiBurstAndMaybeCooldown(preload)) return;
         }catch(e){
           const msg = String(e?.message || e || '');

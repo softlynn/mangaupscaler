@@ -44,6 +44,7 @@ Filename: "{sysnative}\\WindowsPowerShell\\v1.0\\powershell.exe"; Parameters: "-
 Filename: "{sysnative}\\WindowsPowerShell\\v1.0\\powershell.exe"; Parameters: "-NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\\install_windows.ps1"" -SkipNativeMessaging -TorchOnly -NoPause -LogPath ""{app}\\install.log"""; StatusMsg: "Phase 2/3: Installing PyTorch (CUDA)..."; Flags: waituntilterminated runhidden skipifsilent
 Filename: "{sysnative}\\WindowsPowerShell\\v1.0\\powershell.exe"; Parameters: "-NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\\install_windows.ps1"" -SkipNativeMessaging -ModelsOnly -NoPause -LogPath ""{app}\\install.log"""; StatusMsg: "Phase 3/3: Downloading MangaJaNai models..."; Flags: waituntilterminated runhidden skipifsilent
 Filename: "{app}\\{#MyTrayExe}"; Description: "Start Manga Upscaler Host tray"; Flags: nowait postinstall skipifsilent
+Filename: "{sysnative}\\WindowsPowerShell\\v1.0\\powershell.exe"; Parameters: "-NoLogo -NoProfile -Command ""Start-Process notepad.exe '{app}\\install.log'"""; Description: "Open install.log"; Flags: postinstall skipifsilent unchecked
 
 [UninstallRun]
 Filename: "{cmd}"; Parameters: "/c taskkill /IM {#MyTrayExe} /T /F"; Flags: runhidden; RunOnceId: "KillTray"
@@ -168,8 +169,13 @@ begin
     'Write-Host ''--- ' + Title + ' ---'';' +
     'Write-Host ''Tailing: '' $p;' +
     'while(-not (Test-Path $p)) { Start-Sleep -Milliseconds 250 };' +
-    'Get-Content -Path $p -Wait -Tail 60';
-  Args := '-NoProfile -NoExit -Command "' + PsCmd + '"';
+    '$line=''$null'';' +
+    '$tail=Get-Content -Path $p -Wait -Tail 60;' +
+    'foreach($line in $tail){' +
+    '  Write-Host $line;' +
+    '  if($line -like ''*[InnoSetup] Installer finished*''){ break }' +
+    '};';
+  Args := '-NoProfile -Command "' + PsCmd + '"';
   Exec('powershell.exe', Args, '', SW_SHOWNORMAL, ewNoWait, ResultCode);
 end;
 
@@ -214,6 +220,11 @@ begin
     if InstallLogPath <> '' then
       SaveStringToFile(InstallLogPath,
         GetDateTimeString('yyyy-mm-dd hh:nn:ss', '-', ':') + ' [InnoSetup] native_messaging_manifest.json written' + #13#10,
+        True);
+
+    if InstallLogPath <> '' then
+      SaveStringToFile(InstallLogPath,
+        GetDateTimeString('yyyy-mm-dd hh:nn:ss', '-', ':') + ' [InnoSetup] Installer finished' + #13#10,
         True);
   end;
 end;
