@@ -1,80 +1,63 @@
-# MangaUpscaler
+# MangaUpscaler 📚✨
 
 <p align="center">
-  <img src="extension/icons/icon128.png" width="96" alt="MangaUpscaler icon" />
+  <img src="extension/icons/mangaupscaler.png" width="260" alt="MangaUpscaler" />
 </p>
 
-Chrome extension + local AI host for manga enhancement. The extension detects the
-current panel in view and swaps it with an AI-upscaled version served by a local
-host (Real-ESRGAN + MangaJaNai / IllustrationJaNai).
+MangaUpscaler is a Chrome extension + local AI host for manga enhancement.
+It detects the manga panel in view and swaps it with an AI-upscaled version from your PC (Real-ESRGAN + MangaJaNai / IllustrationJaNai).
 
-## Features
-- Auto-detect grayscale vs color panels
-- Auto-select MangaJaNai or IllustrationJaNai
-- Model switching based on input height
-- Quality modes: fast / balanced / best
-- No heavy processing in the browser (AI runs locally)
-- Tray app with logs + cache tools
+## ✨ Features
+- 🎨 Auto-detect grayscale vs color panels
+- 🤖 Auto-select MangaJaNai or IllustrationJaNai
+- 📏 Model switching by input height
+- ⚡ Quality modes: fast / balanced / best
+- 🧠 No heavy browser processing (AI runs locally)
+- 🖥️ Tray app with logs + cache tools (green dot while enhancing)
 
-## Download (Windows)
-Get the latest **pre-release** assets:
-- `MangaUpscalerHostSetup.exe` (one-click installer + tray host)
-- `MangaUpscalerExtension.zip` (Chrome extension)
+## ⬇️ Downloads (Windows)
+- 🖥️ Host installer: [MangaUpscalerHostSetup.exe](https://github.com/softlynn/mangaupscaler/releases/download/v0.2.0-alpha/MangaUpscalerHostSetup.exe)
+- 🧩 Chrome extension: [MangaUpscalerExtension.zip](https://github.com/softlynn/mangaupscaler/releases/download/v0.2.0-alpha/MangaUpscalerExtension.zip)
 
-## Install (Windows, recommended)
-1) Install the extension (unpacked):
-   - Download and unzip `MangaUpscalerExtension.zip`
-   - Chrome -> `chrome://extensions`
-   - Enable **Developer mode**
-   - Click **Load unpacked** -> select the unzipped folder (contains `manifest.json`)
-   - Copy the **Extension ID** shown in Chrome (you’ll need it if auto-detect fails)
+## 🧰 Install (Windows, recommended)
+### 1) Add the extension (unpacked) 🧩
+1. Download and unzip `MangaUpscalerExtension.zip`
+2. In Chrome, open `chrome://extensions`
+3. Enable **Developer mode**
+4. Click **Load unpacked** → select the unzipped folder (contains `manifest.json`)
+5. Copy your **Extension ID** (the installer will try to detect it, but you may need to paste it)
 
-2) Install the local host:
-   - Run `MangaUpscalerHostSetup.exe`
-   - The installer tries to auto-detect the Extension ID; if it can’t, it will ask you to paste it
-   - When finished, the tray app starts automatically
+### 2) Install the local host 🖥️
+1. Run `MangaUpscalerHostSetup.exe`
+2. If auto-detect fails, paste your Extension ID when prompted
+3. When finished, the tray app starts automatically ✅
 
-3) Verify:
-   - Open `http://127.0.0.1:48159/health` (should return `ok`)
-   - Optional: `http://127.0.0.1:48159/status` (shows whether the host is busy)
+### 3) ✅ Optional: verify
+- `http://127.0.0.1:48159/health` → should return `ok`
+- `http://127.0.0.1:48159/status` → shows whether the host is busy
 
-<p>
-  <img src="native_host/installer/assets/wizard_small.png" width="48" alt="Installer icon" />
-  <img src="native_host/installer/assets/wizard_image.png" width="220" alt="Installer wizard" />
-</p>
+## 🚀 Use
+1. Go to your manga site (or add it to the whitelist in Settings).
+2. Open the extension popup:
+   - 🤖 **AI Mode** (recommended): uses the local AI host.
+   - 🔍 **Scale**: AI output scale (2× / 3× / 4×).
+   - ⚡ **AI Quality**: fast / balanced / best.
+3. Click **Enhance** (or enable auto panel mode).
 
-## Use
-1) Go to your manga site (or add it to the whitelist in Settings).
-2) Open the extension popup:
-   - **AI Mode** (recommended): uses the local AI host.
-   - **Scale**: AI output scale (2×/3×/4×).
-   - **AI Quality**: fast / balanced / best.
-3) Click **Enhance** (or enable auto panel mode).
+## 🧩 Local host notes
+- 📦 Models are installed to: `%APPDATA%\\MangaUpscalerHost\\models`
+- 🎨 Recommended IllustrationJaNai (color):
+  - ✅ `4x_IllustrationJaNai_V1_ESRGAN_135k.pth` (fast/balanced)
+  - 🐢 `4x_IllustrationJaNai_V1_DAT2_190k.pth` (best)
+- 🖤 MangaJaNai (grayscale):
+  - Move all grayscale MangaJaNai `.pth` models into the `models` folder
 
-The tray icon shows a **green dot while enhancing**.
+## 🧾 Logs / troubleshooting
+- 📄 Install log: `%APPDATA%\\MangaUpscalerHost\\install.log`
+- 📄 Host log: `%APPDATA%\\MangaUpscalerHost\\host.log`
+- 🔒 If a site blocks loading `http://127.0.0.1:48159/...` directly, MangaUpscaler automatically falls back to `blob:` / `data:` images.
 
-## Local AI host setup
-Models belong in the host `models/` folder (installed to `%APPDATA%\\MangaUpscalerHost\\models`).
-
-Recommended IllustrationJaNai files (color panels):
-- `4x_IllustrationJaNai_V1_ESRGAN_135k.pth` (fast/balanced)
-- `4x_IllustrationJaNai_V1_DAT2_190k.pth` (best)
-
-MangaJaNai files (grayscale panels):
-- Move all grayscale MangaJaNai `.pth` models into the `models/` folder
-
-Install deps:
-```
-cd native_host
-.\install_windows.ps1
-.\install_windows.ps1 -AllowDat2   # optional DAT2 models (slowest, highest quality)
-```
-
-## Logs / troubleshooting
-- Install log: `%APPDATA%\\MangaUpscalerHost\\install.log`
-- Host log: `%APPDATA%\\MangaUpscalerHost\\host.log`
-- If the site blocks loading `http://127.0.0.1:48159/...` directly, the extension automatically falls back to `blob:`/`data:` images.
-
-## Notes
-- The host uses `http://127.0.0.1:48159/enhance`.
+## ℹ️ Notes
+- The host endpoint is `http://127.0.0.1:48159/enhance`.
 - The venv, models, and cache are intentionally ignored by Git.
+
