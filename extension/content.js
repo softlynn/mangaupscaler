@@ -52,6 +52,10 @@ let preloadStatus = { target: 0, preloaded: 0, prefetched: 0, updatedAt: 0, curr
 let pagePrefetch = new Map(); // url -> untilMs
 let enhancedPreloadCache = new Map(); // key -> { blob, contentType, model, byteLength, createdAt, lastUsedAt }
 let enhancedPreloadTotalBytes = 0;
+let autoPending = false;
+let autoPendingPreload = false;
+let lastPreToastAt = 0;
+let lastPreToastMsg = '';
 
 const ENHANCED_PRELOAD_TTL_MS = 2 * 60 * 1000;
 const ENHANCED_PRELOAD_MAX_ENTRIES = 6;
@@ -1092,6 +1096,7 @@ async function preloadAiForImage(imgEl){
 function computePreloadStatus(currentImg){
   const target = clamp(Number(settings.preUpscaleCount || 0), 0, 5);
   const next = getNextCandidateImages(currentImg, target);
+  const available = next.length;
   let preloaded = 0;
   let prefetched = 0;
   for (const ni of next){
@@ -1107,6 +1112,7 @@ function computePreloadStatus(currentImg){
     target,
     preloaded,
     prefetched,
+    available,
     updatedAt: Date.now(),
     currentUrl: String(getBestImageUrl(currentImg) || '')
   };
@@ -1116,10 +1122,36 @@ function isNearViewport(imgEl){
   try{
     const r = imgEl.getBoundingClientRect();
     const vh = window.innerHeight || 1;
-    return (r.top < vh * 1.25) && (r.bottom > -vh * 0.25);
+    const ahead = isWeebCentral() ? 2.0 : 1.25;
+    return (r.top < vh * ahead) && (r.bottom > -vh * 0.25);
   } catch {
     return false;
   }
+}
+
+function maybeToastPreloadProgress(currentImg){
+  if (!settings.showToast) return;
+  if (!settings.enabled || !settings.autoPanel || !hostAllowed()) return;
+  const target = clamp(Number(settings.preUpscaleCount || 0), 0, 5);
+  if (target <= 0) return;
+  const next = getNextCandidateImages(currentImg, target);
+  const available = next.length;
+  if (available <= 0) return;
+  let preloaded = 0;
+  for (const ni of next){
+    const url = getBestImageUrl(ni);
+    if (!url || !isHttpUrl(url)) continue;
+    const key = getPreloadKeyForUrl(url);
+    const ok = (String(ni.dataset?.muPreloadKey || '') === key) && (Number(ni.dataset?.muPreloadUntil || 0) > Date.now());
+    if (ok && getEnhancedPreloadEntry(key)) preloaded++;
+  }
+  const msg = `Pre-upscaled ahead: ${preloaded}/${available} (slider ${target})`;
+  const now = Date.now();
+  if (msg === lastPreToastMsg && (now - lastPreToastAt) < 2500) return;
+  if ((now - lastPreToastAt) < 900) return;
+  lastPreToastAt = now;
+  lastPreToastMsg = msg;
+  makeToast(msg);
 }
 
 async function applyEnhancedCacheIfReady(imgEl, opts={}){
@@ -1284,17 +1316,40 @@ async function processOnce(preload, showStatus){
     // Burst cooldown is only for auto mode; manual Enhance/Preload should do what the user asked.
     const manual = !!showStatus;
     const shouldBurstLimit = settings.autoPanel && !manual;
+    // On WeebCentral, only the "next" panel tends to exist in the DOM at any time.
+    // Start pre-upscaling it immediately so scrolling to it feels instant.
+    let earlyPreload = null;
+    if (preload && isWeebCentral()) {
+      try{
+        const nextCount = clamp(Number(settings.preUpscaleCount||0), 0, 5);
+        const next = getNextCandidateImages(img, nextCount);
+        const first = next[0];
+        if (first) {
+          earlyPreload = (async ()=>{
+            // Let the current enhance request start first, then overlap pre-upscale.
+            await new Promise(r => setTimeout(r, 180));
+            await preloadAiForImage(first);
+            await applyEnhancedCacheIfReady(first);
+          })();
+        }
+      } catch {}
+    }
+
     await processImageElement(img);
     if (shouldBurstLimit && bumpAiBurstAndMaybeCooldown(true, preload)) return;
 
     if (preload){
       const nextCount = clamp(Number(settings.preUpscaleCount||0), 0, 5);
       const next = getNextCandidateImages(img, nextCount);
+      if (earlyPreload) {
+        try { await Promise.race([earlyPreload, new Promise(r => setTimeout(r, 6000))]); } catch {}
+      }
       for (const ni of next){
         try{
           // Pre-upscale: fetch enhanced outputs now, so the next panels are already swapped before you see them.
           await preloadAiForImage(ni);
           try { await applyEnhancedCacheIfReady(ni); } catch {}
+          try { maybeToastPreloadProgress(img); } catch {}
         }catch(e){
           const msg = String(e?.message || e || '');
           if (msg.includes('AI host cooldown')) {
@@ -1312,6 +1367,7 @@ async function processOnce(preload, showStatus){
 
     // Update status after each cycle (so popup can show progress).
     try { computePreloadStatus(img); } catch {}
+    try { maybeToastPreloadProgress(img); } catch {}
 
     // Apply any already-preloaded next panels that are near the viewport.
     try{
@@ -1335,6 +1391,15 @@ async function processOnce(preload, showStatus){
     if (msg) makeToast(`AI failed: ${msg}`);
   } finally {
     busy = false;
+    // If the user scrolls quickly, we may skip a panel while busy. Queue one follow-up run.
+    if (autoPending) {
+      autoPending = false;
+      const p = autoPendingPreload;
+      autoPendingPreload = false;
+      if (settings.enabled && settings.autoPanel && hostAllowed()) {
+        setTimeout(() => processOnce(p, false).catch(()=>{}), 0);
+      }
+    }
   }
 }
 
@@ -1346,7 +1411,11 @@ function startAuto(){
   let lastAutoKey = '';
 
   const onTick = () => {
-    if (busy) return;
+    if (busy) {
+      autoPending = true;
+      autoPendingPreload = Number(settings.preUpscaleCount||0) > 0;
+      return;
+    }
     if (!settings.enabled || !settings.autoPanel || !hostAllowed()) return;
     // Don't spam: only run if current visible image not yet processed
     const img = findBestVisibleImage();
