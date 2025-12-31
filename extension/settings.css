@@ -15,6 +15,7 @@ body{
   background: radial-gradient(1200px 600px at 20% 0%, rgba(255,127,200,.18), transparent 55%),
               radial-gradient(1200px 600px at 80% 0%, rgba(165,139,255,.16), transparent 55%),
               var(--bg);
+  background-attachment: fixed;
   color:var(--text);
 }
 .wrap{ max-width: 980px; margin: 26px auto; padding: 0 16px 40px; }
@@ -57,10 +58,11 @@ h3{ margin: 4px 0 12px; font-size:14px; letter-spacing:.2px; }
 }
 .cacheCard input[type="number"]{
   padding: 8px 10px;
-  font-size:12px;
+  font-size:13px;
 }
 .cacheGrid{
-  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
 }
 .field{
   display:block;

@@ -17,8 +17,13 @@
     body{ margin:0; font: 13px/1.35 system-ui, -apple-system, Segoe UI, Roboto, Arial; background:var(--bg); color:var(--text); width: 330px; }
     .wrap{ padding:14px; }
     .top{ display:flex; align-items:center; gap:10px; margin-bottom:10px; }
-    .logo{ width:34px; height:34px; border-radius:12px; background:linear-gradient(135deg,var(--accent),var(--accent2)); display:grid; place-items:center; box-shadow:0 8px 22px rgba(0,0,0,.35); }
-    .logo span{ font-weight:800; letter-spacing:.5px; }
+    .logo{
+      width:34px; height:34px; border-radius:12px; overflow:hidden;
+      background:#0f0d13; border:1px solid var(--border);
+      display:flex; align-items:center; justify-content:center;
+      box-shadow:0 8px 22px rgba(0,0,0,.35);
+    }
+    .logo img{ width:100%; height:100%; object-fit:cover; display:block; }
     h1{ margin:0; font-size:14px; font-weight:800; }
     .sub{ margin:2px 0 0; color:var(--muted); font-size:12px; }
     .card{ background:var(--card); border:1px solid var(--border); border-radius:18px; padding:12px; box-shadow:0 12px 28px rgba(0,0,0,.25); }
@@ -94,7 +99,7 @@
 <body>
   <div class="wrap">
     <div class="top">
-      <div class="logo" aria-label="logo"><span>MU</span></div>
+      <div class="logo" aria-label="logo"><img src="icons/mangaupscaler.png" alt=""></div>
       <div>
         <h1 id="title">Manga Upscaler</h1>
         <div class="sub">Sharper text - crisp screentones - fewer artifacts</div>

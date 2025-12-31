@@ -104,7 +104,19 @@ function waitForImageLoad(imgEl, timeoutMs=15000){
       if (done) return;
       done = true;
       cleanup();
-      const msg = String(e?.message || e || 'Image failed to load');
+      const rawSrc = String(imgEl.currentSrc || imgEl.src || '');
+      const src =
+        rawSrc.startsWith('data:') ? 'data:…' :
+        rawSrc.startsWith('blob:') ? rawSrc.slice(0, 120) :
+        rawSrc.slice(0, 240);
+
+      const isEventLike = !!(e && typeof e === 'object' && 'type' in e);
+      const type = isEventLike ? String(e.type) : '';
+      const base =
+        (e instanceof Error) ? (e.message || 'Image failed to load') :
+        isEventLike ? 'Image failed to load' :
+        String(e || 'Image failed to load');
+      const msg = src ? `${base}${type && !base.includes(type) ? ` (${type})` : ''} [${src}]` : base;
       reject(new Error(msg));
     };
     const cleanup = () => {
@@ -282,6 +294,14 @@ function findBestVisibleImage(){
 async function fetchImageAsDataURL(url){
   // Already data URL?
   if (url.startsWith('data:')) return url;
+
+  // Blob URLs are page-scoped; fetch them in the content script.
+  if (url.startsWith('blob:')) {
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const blob = await resp.blob();
+    return await blobToDataURL(blob);
+  }
 
   // Ask background to fetch, avoids CORS taint.
   const resp = await chrome.runtime.sendMessage({ type: 'FETCH_IMAGE_DATAURL', url, pageUrl: location.href });
@@ -500,27 +520,22 @@ async function enhanceViaHost(srcUrl){
 
   let resp;
   try{
+    // Avoid swapping the page's <img> to http://127.0.0.1/... because many sites trigger
+    // Chrome Private Network Access (PNA) blocks. Always fetch via extension background
+    // and inject a blob: URL into the page.
     if (isHttpUrl(srcUrl)) {
       resp = await chrome.runtime.sendMessage({
-        type: 'AI_ENHANCE_URL',
-        sourceUrl: srcUrl,
-        scale,
-        quality,
-        format
-      });
-    } else if (srcUrl.startsWith('data:') || srcUrl.startsWith('blob:')) {
-      const dataUrl = await fetchImageAsDataURL(srcUrl);
-      resp = await chrome.runtime.sendMessage({
         type: 'FETCH_AI_ENHANCE',
-        dataUrl,
+        sourceUrl: srcUrl,
         scale,
         quality,
         format
       });
     } else {
+      const dataUrl = await fetchImageAsDataURL(srcUrl);
       resp = await chrome.runtime.sendMessage({
         type: 'FETCH_AI_ENHANCE',
-        sourceUrl: srcUrl,
+        dataUrl,
         scale,
         quality,
         format
@@ -537,13 +552,17 @@ async function enhanceViaHost(srcUrl){
   if (resp.hostError) {
     throw new Error(resp.hostError);
   }
-  if (resp.url) {
-    return { src: resp.url, isObjectUrl: false, model: '', elapsedMs: 0 };
-  }
   if (resp.buffer) {
     const blob = new Blob([resp.buffer], { type: resp.contentType || 'image/png' });
     const objectUrl = URL.createObjectURL(blob);
-    return { src: objectUrl, isObjectUrl: true, model: resp.model || '', elapsedMs: resp.elapsedMs || 0 };
+    return {
+      src: objectUrl,
+      isObjectUrl: true,
+      model: resp.model || '',
+      elapsedMs: resp.elapsedMs || 0,
+      buffer: resp.buffer,
+      contentType: (resp.contentType || blob.type || 'image/png')
+    };
   }
   return { src: resp.dataUrl, isObjectUrl: false, model: resp.model || '', elapsedMs: resp.elapsedMs || 0 };
 }
@@ -611,51 +630,43 @@ async function processImageElement(imgEl){
     removeOverlay = showOverlay(rect, settings.aiMode ? 'AI enhancing…' : 'Enhancing…');
   }, 650);
 
-  let out;
   let model = '';
-  let outIsObjectUrl = false;
-  if (settings.aiMode) {
-    const ai = await enhanceViaHost(src);
-    out = ai.src;
-    model = ai.model;
-    outIsObjectUrl = !!ai.isObjectUrl;
-  } else {
-    const data = await fetchImageAsDataURL(src);
-    out = await enhanceToDataURL(data);
-  }
-
-  clearTimeout(overlayTimer);
-
-  const setAndWait = async (newSrc, isObj) => {
-    replaceImgSrc(imgEl, newSrc, isObj);
-    await waitForImageLoad(imgEl, 20000);
-  };
-
   try{
-    await setAndWait(out, outIsObjectUrl);
-  } catch (e1) {
-    // Primary path is setting <img> to the host URL (fast, avoids message-size limits).
-    // If blocked by CSP/mixed-content, fall back to blob:/data:.
-    if (settings.aiMode && isHttpUrl(src) && !outIsObjectUrl) {
-      const scale = clamp(Number(settings.scale || 3), 2, 4);
-      const quality = String(settings.aiQuality || 'balanced');
-      const resp = await chrome.runtime.sendMessage({ type: 'FETCH_AI_ENHANCE', sourceUrl: src, scale, quality, format: 'webp' });
-      if (!resp?.ok || !resp.buffer) throw e1;
-      if (resp.hostError) throw new Error(resp.hostError);
+    let out;
+    let outIsObjectUrl = false;
+    let outBuffer = null;
+    let outContentType = '';
 
-      const blob = new Blob([resp.buffer], { type: resp.contentType || 'image/webp' });
-      const objectUrl = URL.createObjectURL(blob);
-      try{
-        await setAndWait(objectUrl, true);
-      } catch {
-        const dataUrl = arrayBufferToDataUrl(resp.buffer, resp.contentType || 'image/webp');
-        await setAndWait(dataUrl, false);
-      }
-      model = resp.model || model;
+    if (settings.aiMode) {
+      const ai = await enhanceViaHost(src);
+      out = ai.src;
+      model = ai.model;
+      outIsObjectUrl = !!ai.isObjectUrl;
+      outBuffer = ai.buffer || null;
+      outContentType = ai.contentType || '';
     } else {
-      throw e1;
+      const data = await fetchImageAsDataURL(src);
+      out = await enhanceToDataURL(data);
+    }
+
+    const setAndWait = async (newSrc, isObj) => {
+      replaceImgSrc(imgEl, newSrc, isObj);
+      await waitForImageLoad(imgEl, 20000);
+    };
+
+    try{
+      await setAndWait(out, outIsObjectUrl);
+    } catch (e1) {
+      // If blob: is blocked by CSP, fall back to data:.
+      if (settings.aiMode && outIsObjectUrl && outBuffer) {
+        const dataUrl = arrayBufferToDataUrl(outBuffer, outContentType || 'image/webp');
+        await setAndWait(dataUrl, false);
+      } else {
+        throw e1;
+      }
     }
   } finally {
+    clearTimeout(overlayTimer);
     if (removeOverlay) removeOverlay();
   }
 

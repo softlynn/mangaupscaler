@@ -202,7 +202,7 @@
         <li>Enable AI Enhance in the popup; the tray host will start on demand.</li>
         <li>Optional: run <code>run_host.bat --console</code> for debugging.</li>
       </ol>
-      <p class="hint">When running, the host serves enhanced images at <code>http://127.0.0.1:48159/enhance</code>. The extension swaps the panel image to that URL in AI mode.</p>
+      <p class="hint">When running, the host serves enhanced images at <code>http://127.0.0.1:48159/enhance</code>. The extension fetches results in the background and swaps the panel to a <code>blob:</code> URL (avoids site CORS/Private Network blocks).</p>
     </section>
   </div>
 
