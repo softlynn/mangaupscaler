@@ -26,6 +26,32 @@ def _set_dpi_awareness():
 
 _set_dpi_awareness()
 
+_tray_mutex = None
+
+def _ensure_single_instance_or_exit():
+  # Prevent multiple tray icons (can happen if the extension/installer starts it twice).
+  if os.name != "nt":
+    return
+  try:
+    name = "Global\\MangaUpscalerHostTray"
+    h = ctypes.windll.kernel32.CreateMutexW(None, True, name)
+    # ERROR_ALREADY_EXISTS = 183
+    if ctypes.windll.kernel32.GetLastError() == 183:
+      raise SystemExit(0)
+    global _tray_mutex
+    _tray_mutex = h
+  except SystemExit:
+    raise
+  except Exception:
+    # If mutex fails, fall back to PID-file best effort.
+    try:
+      if os.path.exists(PID_PATH):
+        raise SystemExit(0)
+    except SystemExit:
+      raise
+    except Exception:
+      pass
+
 def _get_root_dir() -> str:
   if getattr(sys, "frozen", False):
     return os.path.dirname(sys.executable)
@@ -297,6 +323,7 @@ def _status_loop(icon, ctl: HostController, idle_icon: Image.Image, busy_icon: I
 
 
 def main():
+  _ensure_single_instance_or_exit()
   _write_pid()
   ctl = HostController()
   ctl.start()

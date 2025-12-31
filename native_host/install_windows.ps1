@@ -31,7 +31,7 @@ function Write-Log {
   }
 }
 
-function Ensure-LogPath {
+function New-LogPathFile {
   if (-not $LogPath) { return }
   try {
     $logDir = Split-Path $LogPath -Parent
@@ -231,7 +231,7 @@ function Find-ExtensionId {
   return $byName
 }
 
-Ensure-LogPath
+New-LogPathFile
 Write-Log ("Install log path: " + $LogPath)
 
 function Write-LogLines {

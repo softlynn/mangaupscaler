@@ -52,6 +52,7 @@ let toastTimer = null;
 let io = null;
 let visibleScores = new Map(); // Map<img, intersectionArea>
 let lastHostStartAt = 0;
+let canvasOverlays = new WeakMap(); // WeakMap<img, { wrapper: HTMLElement, canvas: HTMLCanvasElement }>
 
 // ---------- Settings ----------
 async function loadSettings() {
@@ -167,6 +168,105 @@ function getBestImageUrl(imgEl){
   const data = out.find(u => typeof u === 'string' && u.startsWith('data:') && !isEmptyBase64DataUrl(u));
   if (data) return data;
   return out[0] || '';
+}
+
+function clearCanvasOverlay(imgEl){
+  try{
+    const info = canvasOverlays.get(imgEl);
+    if (!info) return;
+    const { canvas, wrapper } = info;
+    try { canvas.remove(); } catch {}
+    try { wrapper.dataset.muCanvasWrapper = ''; } catch {}
+    canvasOverlays.delete(imgEl);
+    imgEl.style.opacity = '';
+    imgEl.style.position = '';
+    imgEl.style.left = '';
+    imgEl.style.top = '';
+    imgEl.style.width = imgEl.style.width || '';
+    imgEl.style.height = imgEl.style.height || '';
+    imgEl.style.objectFit = imgEl.style.objectFit || '';
+  } catch {}
+}
+
+function ensureCanvasWrapper(imgEl){
+  // Wrap the <img> so we can overlay a <canvas> without breaking layout.
+  const parent = imgEl.parentElement;
+  if (!parent) return null;
+
+  if (parent.dataset && parent.dataset.muCanvasWrapper === '1') {
+    return parent;
+  }
+
+  const wrapper = document.createElement('span');
+  wrapper.dataset.muCanvasWrapper = '1';
+  // Preserve layout: wrapper acts like the original img.
+  const cs = getComputedStyle(imgEl);
+  const rect = imgEl.getBoundingClientRect();
+  wrapper.style.display = (cs.display === 'block' || cs.display === 'flex') ? 'block' : 'inline-block';
+  wrapper.style.position = 'relative';
+  wrapper.style.verticalAlign = cs.verticalAlign || 'baseline';
+  wrapper.style.width = (cs.width && cs.width !== 'auto') ? cs.width : `${Math.max(1, Math.round(rect.width))}px`;
+  wrapper.style.height = (cs.height && cs.height !== 'auto') ? cs.height : `${Math.max(1, Math.round(rect.height))}px`;
+  wrapper.style.maxWidth = cs.maxWidth || '';
+  wrapper.style.maxHeight = cs.maxHeight || '';
+
+  parent.insertBefore(wrapper, imgEl);
+  wrapper.appendChild(imgEl);
+  return wrapper;
+}
+
+async function renderBlobOverImage(imgEl, blob){
+  if (!blob || !blob.size) throw new Error('AI returned empty image');
+
+  const wrapper = ensureCanvasWrapper(imgEl);
+  if (!wrapper) throw new Error('Cannot overlay canvas');
+
+  const canvas = document.createElement('canvas');
+  canvas.style.cssText = `
+    position:absolute; left:0; top:0; width:100%; height:100%;
+    pointer-events:none; image-rendering:auto;
+  `;
+
+  // Try decode via createImageBitmap (not subject to img-src CSP).
+  let bmp = null;
+  try{
+    bmp = await createImageBitmap(blob);
+  } catch {
+    // Fallback: this may still fail on strict CSP, but try.
+    const obj = URL.createObjectURL(blob);
+    try{
+      const im = await loadImage(obj);
+      bmp = im;
+    } finally {
+      try { URL.revokeObjectURL(obj); } catch {}
+    }
+  }
+
+  const bw = bmp.width || bmp.naturalWidth || 1;
+  const bh = bmp.height || bmp.naturalHeight || 1;
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
+  canvas.width = Math.max(1, Math.round(bw * dpr));
+  canvas.height = Math.max(1, Math.round(bh * dpr));
+
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(bmp, 0, 0, bw, bh);
+
+  // Hide original without removing it (avoids breaking site scripts).
+  imgEl.style.position = 'absolute';
+  imgEl.style.left = '0';
+  imgEl.style.top = '0';
+  imgEl.style.width = '100%';
+  imgEl.style.height = '100%';
+  imgEl.style.objectFit = 'contain';
+  imgEl.style.opacity = '0';
+
+  // Replace any existing overlay.
+  clearCanvasOverlay(imgEl);
+  wrapper.appendChild(canvas);
+  canvasOverlays.set(imgEl, { wrapper, canvas });
 }
 
 function waitForImageLoad(imgEl, timeoutMs=15000){
@@ -334,7 +434,12 @@ function findBestVisibleImage(){
     let best = null;
     let bestScore = 0;
     for (const [img, score] of visibleScores){
-      if (!img || !img.isConnected || !img.src) {
+      if (!img || !img.isConnected || !(img.currentSrc || img.src)) {
+        visibleScores.delete(img);
+        continue;
+      }
+      const u = getBestImageUrl(img);
+      if (!u || isEmptyBase64DataUrl(u)) {
         visibleScores.delete(img);
         continue;
       }
@@ -352,7 +457,9 @@ function findBestVisibleImage(){
   let bestScore = 0;
 
   for (const img of imgs){
-    if (!img || !img.src) continue;
+    if (!img || !(img.currentSrc || img.src)) continue;
+    const u = getBestImageUrl(img);
+    if (!u || isEmptyBase64DataUrl(u)) continue;
     const r = img.getBoundingClientRect();
     if (r.width < 80 || r.height < 80) continue;
     if (r.bottom < 0 || r.right < 0 || r.top > vh || r.left > vw) continue;
@@ -791,8 +898,12 @@ function getNextCandidateImages(currentImg, n){
 }
 
 async function processImageElement(imgEl){
+  // Skip if we recently failed this element (prevents flicker + host spam).
+  const failUntil = Number(imgEl?.dataset?.muFailUntil || 0);
+  if (failUntil && Date.now() < failUntil) return;
+
   const src = getBestImageUrl(imgEl);
-  if (!src) throw new Error('No usable image source');
+  if (!src || isEmptyBase64DataUrl(src)) throw new Error('No usable image source');
 
   // If already upscaled by us, skip
   if (imgEl.dataset.muUpscaled === '1') return;
@@ -832,11 +943,20 @@ async function processImageElement(imgEl){
     } catch (e1) {
       // If blob: is blocked by CSP, fall back to data: generated from the Blob.
       if (settings.aiMode && outIsObjectUrl && outBlob) {
-        const dataUrl = await blobToDataURL(outBlob);
-        if (!/^data:[^;]+;base64,.+/.test(dataUrl)) {
-          throw new Error('AI returned empty image');
+        // Restore original <img> state first (so we don't leave a broken blob: src behind),
+        // then either try data: or draw into a <canvas> overlay if CSP blocks both.
+        try { restoreImg(imgEl); } catch {}
+
+        try{
+          const dataUrl = await blobToDataURL(outBlob);
+          if (!/^data:[^;]+;base64,.+/.test(dataUrl)) {
+            throw new Error('AI returned empty image');
+          }
+          await setAndWait(dataUrl, false);
+        } catch (e2) {
+          // Strict CSP often blocks data:/blob: in <img>. Canvas overlay still works.
+          await renderBlobOverImage(imgEl, outBlob);
         }
-        await setAndWait(dataUrl, false);
       } else {
         throw e1;
       }
@@ -844,6 +964,8 @@ async function processImageElement(imgEl){
   } catch (e) {
     // On failure, restore the original image so we don't leave a broken data:/blob: src behind.
     try { restoreImg(imgEl); } catch {}
+    try { clearCanvasOverlay(imgEl); } catch {}
+    try { imgEl.dataset.muFailUntil = String(Date.now() + 15000); } catch {}
     throw e;
   } finally {
     clearTimeout(overlayTimer);
