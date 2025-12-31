@@ -747,7 +747,8 @@ function scheduleAfterCooldown(preload){
   }, waitMs);
 }
 
-function bumpAiBurstAndMaybeCooldown(preload){
+function bumpAiBurstAndMaybeCooldown(countForCooldown, preload){
+  if (!countForCooldown) return false;
   const now = Date.now();
   // If it's been a while since the last successful enhance, reset the burst counter.
   if (!aiBurstLastAt || (now - aiBurstLastAt) > 45000) {
@@ -773,15 +774,28 @@ function bumpAiBurstAndMaybeCooldown(preload){
 
 function getNextCandidateImages(currentImg, n){
   if (n <= 0) return [];
+
+  const curRect = currentImg.getBoundingClientRect();
+  const curTop = curRect.top + window.scrollY;
+  const curW = Math.max(1, curRect.width || currentImg.naturalWidth || 0);
+  const curH = Math.max(1, curRect.height || currentImg.naturalHeight || 0);
+  const minW = Math.max(220, curW * 0.55);
+  const minH = Math.max(220, curH * 0.55);
+
   const imgs = Array.from(document.images || []).filter(i => {
     if (!i || i === currentImg) return false;
     if (i.dataset?.muUpscaled === '1') return false;
     const u = getBestImageUrl(i);
     if (!u || isEmptyBase64DataUrl(u)) return false;
+    const r = i.getBoundingClientRect();
+    if (!r || r.width < minW || r.height < minH) return false;
+    const top = r.top + window.scrollY;
+    // keep candidates in a reasonable window below/around the current panel
+    if (top < (curTop - window.innerHeight * 0.5)) return false;
+    if (top > (curTop + window.innerHeight * 8.0)) return false;
     return true;
   });
   // Prefer those near/below the current image
-  const curTop = currentImg.getBoundingClientRect().top + window.scrollY;
   const scored = imgs.map(i=>{
     const top = i.getBoundingClientRect().top + window.scrollY;
     return { i, d: Math.abs(top - curTop), below: top >= curTop ? 0 : 1 };
@@ -943,7 +957,7 @@ async function processOnce(preload, showStatus){
     const manual = !!showStatus;
     const shouldBurstLimit = settings.autoPanel && !manual;
     await processImageElement(img);
-    if (shouldBurstLimit && bumpAiBurstAndMaybeCooldown(preload)) return;
+    if (shouldBurstLimit && bumpAiBurstAndMaybeCooldown(true, preload)) return;
 
     if (preload){
       const next = getNextCandidateImages(img, clamp(Number(settings.preUpscaleCount||0), 0, 4));
@@ -951,7 +965,8 @@ async function processOnce(preload, showStatus){
         try{
           // AI preload: warm the host disk cache without touching page DOM (prevents flicker + CSP issues).
           await preloadAiForImage(ni);
-          if (shouldBurstLimit && bumpAiBurstAndMaybeCooldown(preload)) return;
+          // Don't trigger cooldown from preloads; only from actual on-screen enhances.
+          if (shouldBurstLimit && bumpAiBurstAndMaybeCooldown(false, preload)) return;
         }catch(e){
           const msg = String(e?.message || e || '');
           if (msg.includes('AI host cooldown')) {
@@ -988,15 +1003,33 @@ function startAuto(){
   if (observerStarted) return;
   observerStarted = true;
 
+  let lastAutoKey = '';
+
   const onTick = () => {
     if (busy) return;
     if (!settings.enabled || !settings.autoPanel || !hostAllowed()) return;
+    if (!settings.aiMode) return;
     // Don't spam: only run if current visible image not yet processed
     const img = findBestVisibleImage();
     if (!img) return;
-    if (img.dataset.muUpscaled === '1') return;
-    // run in background
-    processOnce(false);
+    if (img.dataset.muUpscaled === '1') {
+      // Even if current is already upscaled, keep preloading ahead as the user scrolls.
+      const k = img.dataset.muOriginalSrc || img.currentSrc || img.src || '';
+      const key = `${k}::n=${Number(settings.preUpscaleCount||0)}`;
+      if (key && key !== lastAutoKey) {
+        lastAutoKey = key;
+        if (Number(settings.preUpscaleCount||0) > 0) {
+          processOnce(true).catch(()=>{});
+        }
+      }
+      return;
+    }
+
+    // Auto-preload is driven by the same slider; if you set it to >0, scrolling will keep the cache warm.
+    const shouldPreload = Number(settings.preUpscaleCount||0) > 0;
+    const k = img.dataset.muOriginalSrc || img.currentSrc || img.src || '';
+    lastAutoKey = `${k}::n=${Number(settings.preUpscaleCount||0)}`;
+    processOnce(shouldPreload).catch(()=>{});
   };
 
   let t = null;
