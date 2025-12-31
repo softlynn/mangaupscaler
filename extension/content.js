@@ -227,20 +227,7 @@ async function renderBlobOverImage(imgEl, blob){
     pointer-events:none; image-rendering:auto;
   `;
 
-  // Try decode via createImageBitmap (not subject to img-src CSP).
-  let bmp = null;
-  try{
-    bmp = await createImageBitmap(blob);
-  } catch {
-    // Fallback: this may still fail on strict CSP, but try.
-    const obj = URL.createObjectURL(blob);
-    try{
-      const im = await loadImage(obj);
-      bmp = im;
-    } finally {
-      try { URL.revokeObjectURL(obj); } catch {}
-    }
-  }
+  const bmp = await decodeBlobToBitmap(blob);
 
   const bw = bmp.width || bmp.naturalWidth || 1;
   const bh = bmp.height || bmp.naturalHeight || 1;
@@ -505,9 +492,64 @@ function loadImage(dataUrl){
   return new Promise((resolve, reject) => {
     const im = new Image();
     im.onload = () => resolve(im);
-    im.onerror = () => reject(new Error('Image decode failed'));
+    im.onerror = () => {
+      const raw = String(im.src || '');
+      const src =
+        raw.startsWith('data:') ? 'data:.' :
+        raw.startsWith('blob:') ? raw.slice(0, 120) :
+        raw.slice(0, 240);
+      reject(new Error(`Image decode failed [${src}]`));
+    };
     im.src = dataUrl;
   });
+}
+
+async function sniffMimeFromBlob(blob){
+  try{
+    const buf = await blob.slice(0, 32).arrayBuffer();
+    const u = new Uint8Array(buf);
+    // PNG signature: 89 50 4E 47 0D 0A 1A 0A
+    if (u.length >= 8 && u[0] === 0x89 && u[1] === 0x50 && u[2] === 0x4E && u[3] === 0x47) return 'image/png';
+    // JPEG: FF D8 FF
+    if (u.length >= 3 && u[0] === 0xFF && u[1] === 0xD8 && u[2] === 0xFF) return 'image/jpeg';
+    // WebP: "RIFF"...."WEBP"
+    if (u.length >= 12) {
+      const riff = String.fromCharCode(u[0],u[1],u[2],u[3]);
+      const webp = String.fromCharCode(u[8],u[9],u[10],u[11]);
+      if (riff === 'RIFF' && webp === 'WEBP') return 'image/webp';
+    }
+  } catch {}
+  return '';
+}
+
+async function decodeBlobToBitmap(blob){
+  // 1) createImageBitmap works for most cases and is not subject to page img-src CSP.
+  try{
+    return await createImageBitmap(blob);
+  } catch {
+    // 2) WebCodecs ImageDecoder fallback when available (also bypasses img-src CSP).
+    try{
+      if (typeof ImageDecoder !== 'undefined') {
+        const sniff = await sniffMimeFromBlob(blob);
+        const type = (blob.type && blob.type !== 'application/octet-stream') ? blob.type : (sniff || 'image/webp');
+        const dec = new ImageDecoder({ data: blob, type });
+        const frame = await dec.decode({ frameIndex: 0 });
+        try { await dec.close(); } catch {}
+        return frame.image;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // 3) Last resort: decode via <img>. This can be blocked by CSP.
+  const obj = URL.createObjectURL(blob);
+  try{
+    const im = await loadImage(obj);
+    return im;
+  } finally {
+    try { URL.revokeObjectURL(obj); } catch {}
+  }
 }
 
 // ---------- Enhancement pipeline ----------
