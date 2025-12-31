@@ -48,7 +48,7 @@ let io = null;
 let visibleScores = new Map(); // Map<img, intersectionArea>
 let lastHostStartAt = 0;
 let canvasOverlays = new WeakMap(); // WeakMap<img, { wrapper: HTMLElement, canvas: HTMLCanvasElement }>
-let preloadStatus = { target: 0, preloaded: 0, prefetched: 0, updatedAt: 0, currentUrl: '' };
+let preloadStatus = { target: 0, cached: 0, enhanced: 0, prefetched: 0, available: 0, updatedAt: 0, currentUrl: '' };
 let pagePrefetch = new Map(); // url -> untilMs
 let enhancedPreloadCache = new Map(); // key -> { blob, contentType, model, byteLength, createdAt, lastUsedAt }
 let enhancedPreloadTotalBytes = 0;
@@ -57,6 +57,9 @@ let autoPendingPreload = false;
 let lastPreToastAt = 0;
 let lastPreToastMsg = '';
 let lastScrollAt = 0;
+let warmTimer = null;
+let warmInFlight = false;
+let preSwapBusy = false;
 
 const ENHANCED_PRELOAD_TTL_MS = 2 * 60 * 1000;
 const ENHANCED_PRELOAD_MAX_ENTRIES = 6;
@@ -1057,40 +1060,35 @@ async function preloadAiForImage(imgEl){
   const src = getBestImageUrl(imgEl);
   if (!src || !isHttpUrl(src) || isEmptyBase64DataUrl(src)) return false;
 
-  // This is "pre-upscale": fetch the enhanced output ahead of time so it can be swapped in instantly.
-  // The host will still cache it on disk.
+  // Warm the host disk cache ahead of time (low memory). Swapping happens just-in-time as panels approach view.
   if (Date.now() < aiHostDownUntil) throw new Error('AI host cooldown');
+
+  const scale = clamp(Number(settings.scale || 3), 2, 4);
+  const quality = String(settings.aiQuality || 'balanced');
+  const format = 'webp';
 
   const key = getPreloadKeyForUrl(src);
   const prevKey = String(imgEl.dataset?.muPreloadKey || '');
   const until = Number(imgEl.dataset?.muPreloadUntil || 0);
-  if (prevKey === key && until && Date.now() < until && getEnhancedPreloadEntry(key)) return true;
+  if (prevKey === key && until && Date.now() < until) return true;
 
   imgEl.dataset.muPreloadKey = key;
-  imgEl.dataset.muPreloadUntil = String(Date.now() + ENHANCED_PRELOAD_TTL_MS);
+  imgEl.dataset.muPreloadUntil = String(Date.now() + 90_000);
 
   // Preload the actual page image too (so scrolling doesn't show blank placeholders).
   prefetchUrl(src);
   touchPagePreload(imgEl, src);
 
-  maybeStartHost('preload_fetch');
-  const out = await fetchEnhancedBlobForUrl(src, { format: 'webp' });
-
-  _evictEnhancedPreloadIfNeeded();
-  const prev = enhancedPreloadCache.get(key);
-  if (prev) enhancedPreloadTotalBytes -= Number(prev.byteLength || 0);
-
-  const entry = {
-    blob: out.blob,
-    contentType: out.contentType,
-    model: out.model,
-    byteLength: Number(out.blob.size || 0),
-    createdAt: Date.now(),
-    lastUsedAt: Date.now()
-  };
-  enhancedPreloadCache.set(key, entry);
-  enhancedPreloadTotalBytes += entry.byteLength;
-  _evictEnhancedPreloadIfNeeded();
+  maybeStartHost('preload');
+  const resp = await chrome.runtime.sendMessage({
+    type: 'AI_PRELOAD',
+    sourceUrl: src,
+    scale,
+    quality,
+    format
+  });
+  if (!resp?.ok) throw new Error(resp?.error || 'Preload failed');
+  if (resp.hostError) throw new Error(resp.hostError);
   return true;
 }
 
@@ -1098,20 +1096,23 @@ function computePreloadStatus(currentImg){
   const target = clamp(Number(settings.preUpscaleCount || 0), 0, 5);
   const next = getNextCandidateImages(currentImg, target);
   const available = next.length;
-  let preloaded = 0;
+  let cached = 0;
+  let enhanced = 0;
   let prefetched = 0;
   for (const ni of next){
+    if (ni?.dataset?.muUpscaled === '1') enhanced++;
     const url = getBestImageUrl(ni);
     if (!url || !isHttpUrl(url)) continue;
     const key = getPreloadKeyForUrl(url);
     const ok = (String(ni.dataset?.muPreloadKey || '') === key) && (Number(ni.dataset?.muPreloadUntil || 0) > Date.now());
-    if (ok && getEnhancedPreloadEntry(key)) preloaded++;
+    if (ok) cached++;
     const u2 = pagePrefetch.get(url) || 0;
     if (u2 && Date.now() < u2) prefetched++;
   }
   preloadStatus = {
     target,
-    preloaded,
+    cached,
+    enhanced,
     prefetched,
     available,
     updatedAt: Date.now(),
@@ -1138,15 +1139,17 @@ function maybeToastPreloadProgress(currentImg){
   const next = getNextCandidateImages(currentImg, target);
   const available = next.length;
   if (available <= 0) return;
-  let preloaded = 0;
+  let cached = 0;
+  let enhanced = 0;
   for (const ni of next){
+    if (ni?.dataset?.muUpscaled === '1') enhanced++;
     const url = getBestImageUrl(ni);
     if (!url || !isHttpUrl(url)) continue;
     const key = getPreloadKeyForUrl(url);
     const ok = (String(ni.dataset?.muPreloadKey || '') === key) && (Number(ni.dataset?.muPreloadUntil || 0) > Date.now());
-    if (ok && getEnhancedPreloadEntry(key)) preloaded++;
+    if (ok) cached++;
   }
-  const msg = `Pre-upscaled ahead: ${preloaded}/${available} (slider ${target})`;
+  const msg = `Ahead: enhanced ${enhanced}/${available} • cached ${cached}/${available} (slider ${target})`;
   const now = Date.now();
   if (msg === lastPreToastMsg && (now - lastPreToastAt) < 2500) return;
   if ((now - lastPreToastAt) < 900) return;
@@ -1155,44 +1158,67 @@ function maybeToastPreloadProgress(currentImg){
   makeToast(msg);
 }
 
-async function applyEnhancedCacheIfReady(imgEl, opts={}){
+function isHostCacheWarm(imgEl){
+  try{
+    const src = getBestImageUrl(imgEl);
+    if (!src || !isHttpUrl(src)) return false;
+    const key = getPreloadKeyForUrl(src);
+    const ok = (String(imgEl.dataset?.muPreloadKey || '') === key) && (Number(imgEl.dataset?.muPreloadUntil || 0) > Date.now());
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+async function preSwapFromHostIfWarm(imgEl, opts={}){
   if (!imgEl) return false;
   if (imgEl.dataset?.muUpscaled === '1') return false;
+  if (!opts.force && !isNearViewport(imgEl)) return false;
+  if (!isHostCacheWarm(imgEl)) return false;
+  if (preSwapBusy) return false;
+
   const src = getBestImageUrl(imgEl);
   if (!src || !isHttpUrl(src)) return false;
-  const key = getPreloadKeyForUrl(src);
-  const entry = getEnhancedPreloadEntry(key);
-  if (!entry?.blob) return false;
 
   // Ensure the page is also loading this image (prevents "blank page" while scrolling).
   prefetchUrl(src);
   touchPagePreload(imgEl, src);
 
-  if (!opts.force && !isNearViewport(imgEl)) return false;
-
-  const outBlob = entry.blob;
-  const objectUrl = URL.createObjectURL(outBlob);
-
-  const setAndWait = async (newSrc, isObj) => {
-    replaceImgSrc(imgEl, newSrc, isObj);
-    await waitForImageLoad(imgEl, 20000);
-  };
-
+  preSwapBusy = true;
   try{
-    await setAndWait(objectUrl, true);
-  } catch {
-    try { restoreImg(imgEl); } catch {}
-    try{
-      const dataUrl = await blobToDataURL(outBlob);
-      await setAndWait(dataUrl, false);
-    } catch {
-      await renderBlobOverImage(imgEl, outBlob);
-    }
-  }
+    const ai = await enhanceViaHost(src); // should be fast when host cache is warm
+    const out = ai.src;
+    const outIsObjectUrl = !!ai.isObjectUrl;
+    const outBlob = ai.blob || null;
 
-  imgEl.dataset.muUpscaled = '1';
-  // No sparkle/toast: preloaded swaps should feel invisible.
-  return true;
+    const setAndWait = async (newSrc, isObj) => {
+      replaceImgSrc(imgEl, newSrc, isObj);
+      await waitForImageLoad(imgEl, 20000);
+    };
+
+    try{
+      await setAndWait(out, outIsObjectUrl);
+    } catch (e1) {
+      if (outIsObjectUrl && outBlob) {
+        try { restoreImg(imgEl); } catch {}
+        try{
+          const dataUrl = await blobToDataURL(outBlob);
+          await setAndWait(dataUrl, false);
+        } catch {
+          await renderBlobOverImage(imgEl, outBlob);
+        }
+      } else {
+        throw e1;
+      }
+    }
+
+    imgEl.dataset.muUpscaled = '1';
+    return true;
+  } catch {
+    return false;
+  } finally {
+    preSwapBusy = false;
+  }
 }
 
 async function processImageElement(imgEl){
@@ -1323,18 +1349,13 @@ async function processOnce(preload, showStatus){
     if (shouldBurstLimit && bumpAiBurstAndMaybeCooldown(true, preload)) return;
 
     if (preload){
-      // Heavy GPU work is expensive and can make scrolling feel laggy.
-      // If the user is actively scrolling, delay pre-upscales to the next tick.
-      if (!manual && (Date.now() - lastScrollAt) < 180) {
-        try { maybeToastPreloadProgress(img); } catch {}
-      } else {
       const nextCount = clamp(Number(settings.preUpscaleCount||0), 0, 5);
       const next = getNextCandidateImages(img, nextCount);
       for (const ni of next){
         try{
-          // Pre-upscale: fetch enhanced outputs now, so the next panels are already swapped before you see them.
+          // Warm host cache for upcoming pages. Swapping happens just-in-time as they approach view.
           await preloadAiForImage(ni);
-          try { await applyEnhancedCacheIfReady(ni); } catch {}
+          try { await preSwapFromHostIfWarm(ni); } catch {}
           try { maybeToastPreloadProgress(img); } catch {}
         }catch(e){
           const msg = String(e?.message || e || '');
@@ -1349,19 +1370,18 @@ async function processOnce(preload, showStatus){
           // ignore per-item
         }
       }
-      }
     }
 
     // Update status after each cycle (so popup can show progress).
     try { computePreloadStatus(img); } catch {}
     try { maybeToastPreloadProgress(img); } catch {}
 
-    // Apply any already-preloaded next panels that are near the viewport.
+    // Apply any already-cached next panels that are near the viewport.
     try{
       const t = clamp(Number(settings.preUpscaleCount||0), 0, 5);
       const next = getNextCandidateImages(img, t);
       for (const ni of next){
-        try { await applyEnhancedCacheIfReady(ni); } catch {}
+        try { await preSwapFromHostIfWarm(ni); } catch {}
       }
     } catch {}
   } catch(e){
@@ -1397,6 +1417,37 @@ function startAuto(){
 
   let lastAutoKey = '';
 
+  const scheduleWarmAhead = (img) => {
+    if (!img) return;
+    const target = clamp(Number(settings.preUpscaleCount||0), 0, 5);
+    if (target <= 0) return;
+    if (warmTimer) clearTimeout(warmTimer);
+    warmTimer = setTimeout(async ()=>{
+      warmTimer = null;
+      if (!settings.enabled || !settings.autoPanel || !hostAllowed()) return;
+      // Only do expensive warm-ahead when the user pauses scrolling.
+      if ((Date.now() - lastScrollAt) < (isWeebCentral() ? 220 : 260)) return;
+      if (busy || warmInFlight) return;
+      warmInFlight = true;
+      try{
+        const next = getNextCandidateImages(img, target);
+        for (const ni of next){
+          if ((Date.now() - lastScrollAt) < 120) break; // user resumed scrolling
+          if (!ni || ni.dataset?.muUpscaled === '1') continue;
+          try{
+            await preloadAiForImage(ni);
+          } catch {
+            // ignore per-item warm errors
+          }
+        }
+        try { computePreloadStatus(img); } catch {}
+        try { maybeToastPreloadProgress(img); } catch {}
+      } finally {
+        warmInFlight = false;
+      }
+    }, isWeebCentral() ? 220 : 320);
+  };
+
   const onTick = () => {
     if (busy) {
       autoPending = true;
@@ -1408,15 +1459,18 @@ function startAuto(){
     const img = findBestVisibleImage();
     if (!img) return;
 
-    // If we already pre-upscaled this (or a nearby next panel), swap it in before it becomes visible.
+    // If the host cache is already warm for this (or a nearby next panel), swap it in before it becomes visible.
     try{
-      applyEnhancedCacheIfReady(img).catch(()=>{});
+      preSwapFromHostIfWarm(img).catch(()=>{});
       const t = clamp(Number(settings.preUpscaleCount||0), 0, 5);
       const next = getNextCandidateImages(img, t);
       for (const ni of next){
-        if (isNearViewport(ni)) applyEnhancedCacheIfReady(ni).catch(()=>{});
+        if (isNearViewport(ni)) preSwapFromHostIfWarm(ni).catch(()=>{});
       }
     } catch {}
+
+    // Always schedule warm-ahead (runs only when scrolling pauses).
+    scheduleWarmAhead(img);
 
     if (img.dataset.muUpscaled === '1') {
       // Even if current is already upscaled, keep preloading ahead as the user scrolls.

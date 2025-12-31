@@ -137,10 +137,13 @@ async function refreshPreStatus(){
     if (!preStatus) return;
     if (!resp || typeof resp !== 'object') { preStatus.textContent = ''; return; }
     const t = Number(resp.target || 0);
-    const p = Number(resp.preloaded || 0);
+    const c = Number(resp.cached || 0);
+    const e = Number(resp.enhanced || 0);
     const f = Number(resp.prefetched || 0);
+    const a = Number(resp.available || 0);
     if (t <= 0) { preStatus.textContent = ''; return; }
-    preStatus.textContent = `Preloaded ahead: ${p}/${t}  •  Page prefetched: ${f}/${t}`;
+    const denom = a > 0 ? a : t;
+    preStatus.textContent = `Ahead: enhanced ${e}/${denom} • cached ${c}/${denom} • page prefetched ${f}/${denom}`;
   } catch {
     if (preStatus) preStatus.textContent = '';
   }
