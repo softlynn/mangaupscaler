@@ -108,6 +108,19 @@ async function ensureHostRunning(reason){
   return false;
 }
 
+function isCommError(err){
+  const msg = String(err?.message || err || '');
+  // fetch() network failures in extensions typically show up as TypeError: Failed to fetch.
+  return (
+    err instanceof TypeError ||
+    msg.includes('Failed to fetch') ||
+    msg.includes('NetworkError') ||
+    msg.includes('ECONNREFUSED') ||
+    msg.includes('ERR_CONNECTION') ||
+    msg.includes('ERR_FAILED')
+  );
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     try {
@@ -160,12 +173,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (sourceUrl) qs.set('url', sourceUrl);
         const url = `${AI_HOST}/enhance?${qs.toString()}`;
 
+        const doFetch = async () => {
+          if (dataUrl && !sourceUrl) {
+            const { bytes, contentType } = dataUrlToBytes(dataUrl);
+            return await fetch(url, { method: 'POST', body: bytes, headers: { 'Content-Type': contentType } });
+          }
+          return await fetch(url, { cache: 'no-store' });
+        };
+
         let resp;
-        if (dataUrl && !sourceUrl) {
-          const { bytes, contentType } = dataUrlToBytes(dataUrl);
-          resp = await fetch(url, { method: 'POST', body: bytes, headers: { 'Content-Type': contentType } });
-        } else {
-          resp = await fetch(url, { cache: 'no-store' });
+        try{
+          resp = await doFetch();
+        } catch (e) {
+          // If the host process died or the local server is down, try restarting once.
+          if (isCommError(e)) {
+            await stopNativeHost('comm_error_retry');
+            await ensureHostRunning('comm_error_retry');
+            resp = await doFetch();
+          } else {
+            throw e;
+          }
         }
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const model = resp.headers.get('X-MU-Model') || '';
@@ -192,7 +219,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (format) qs.set('format', String(format));
         qs.set('url', sourceUrl);
         const url = `${AI_HOST}/enhance?${qs.toString()}`;
-        const resp = await fetch(url, { cache: 'no-store' });
+        let resp;
+        try{
+          resp = await fetch(url, { cache: 'no-store' });
+        } catch (e) {
+          if (isCommError(e)) {
+            await stopNativeHost('comm_error_retry');
+            await ensureHostRunning('comm_error_retry');
+            resp = await fetch(url, { cache: 'no-store' });
+          } else {
+            throw e;
+          }
+        }
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const model = resp.headers.get('X-MU-Model') || '';
         const hostError = resp.headers.get('X-MU-Host-Error') || '';
