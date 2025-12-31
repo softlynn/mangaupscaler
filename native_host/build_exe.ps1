@@ -7,7 +7,15 @@ $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
 if (-not (Test-Path ".venv")) {
-  py -3.10 -m venv .venv
+  try {
+    py -3.11 -m venv .venv
+  } catch {
+    try {
+      py -3.10 -m venv .venv
+    } catch {
+      py -m venv .venv
+    }
+  }
 }
 
 . .\.venv\Scripts\Activate.ps1
