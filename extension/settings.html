@@ -125,6 +125,27 @@
     </section>
 
     <section class="card">
+      <h3>Diagnostics (optional)</h3>
+      <div class="row">
+        <div>
+          <div class="label">Share anonymous diagnostics</div>
+          <div class="sub">Helps improve compatibility. Never sends images or full URLs.</div>
+        </div>
+        <div id="telemetryEnabled" class="toggle"><div class="knob"></div></div>
+      </div>
+      <div class="row">
+        <div>
+          <div class="label">View local diagnostics</div>
+          <div class="sub">Opens the most recent telemetry collected by your local host.</div>
+        </div>
+        <button id="viewTelemetry" class="btn">Open</button>
+      </div>
+      <p class="hint">
+        Collected fields are limited to: site hostname, a redacted path signature, image/lazyload counts, and timing/errors for enhance/preload.
+      </p>
+    </section>
+
+    <section class="card">
       <div class="wlHead">
         <div>
           <h3>Whitelist (per site)</h3>

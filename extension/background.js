@@ -267,6 +267,24 @@ function isCommError(err){
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     try {
+      if (msg?.type === 'TELEMETRY_EVENT') {
+        const payload = msg.payload || {};
+        // Never start the host just for telemetry.
+        if (!await pingHost()) { sendResponse({ ok: true, dropped: true }); return; }
+        try{
+          const resp = await fetch(`${AI_HOST}/telemetry`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          sendResponse({ ok: resp.ok });
+          return;
+        } catch {
+          sendResponse({ ok: false });
+          return;
+        }
+      }
+
       if (msg?.type === 'FETCH_IMAGE_DATAURL') {
         const { url } = msg;
         if (!url) throw new Error('No url');

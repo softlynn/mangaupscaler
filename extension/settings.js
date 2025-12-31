@@ -10,7 +10,8 @@ const DEFAULTS = {
   allowDat2: false,
   cacheMaxGb: 1.0,
   cacheMaxAgeDays: 0,
-  idleShutdownMinutes: 5
+  idleShutdownMinutes: 5,
+  telemetryEnabled: false
 };
 
 const POPULAR = [
@@ -112,6 +113,7 @@ async function readUIIntoSettings(){
   s.autoPanel = getToggle($('autoPanel'));
   s.showToast = getToggle($('showToast'));
   s.allowDat2 = getToggle($('allowDat2'));
+  s.telemetryEnabled = getToggle($('telemetryEnabled'));
   s.aiQuality = String($('aiQuality')?.value || s.aiQuality || 'balanced');
   s.scale = Number($('scale').value) || 3;
   s.preUpscaleCount = Number($('preUpscaleCount').value) || 0;
@@ -173,6 +175,7 @@ async function init(){
   setToggle($('autoPanel'), s.autoPanel);
   setToggle($('showToast'), s.showToast);
   setToggle($('allowDat2'), s.allowDat2);
+  setToggle($('telemetryEnabled'), !!s.telemetryEnabled);
   $('aiQuality').value = String(s.aiQuality || 'balanced');
 
   $('scale').value = String(s.scale||3);
@@ -192,7 +195,7 @@ async function init(){
   });
 
   // toggle blocks
-  ['enabled','autoPanel','showToast','allowDat2'].forEach(id=>{
+  ['enabled','autoPanel','showToast','allowDat2','telemetryEnabled'].forEach(id=>{
     $(id).addEventListener('click', ()=>$(id).classList.toggle('on'));
   });
 
@@ -225,6 +228,12 @@ async function init(){
     }
     $('saveBtn').textContent = 'Saved!';
     setTimeout(()=> $('saveBtn').textContent = 'Save', 900);
+  });
+
+  $('viewTelemetry').addEventListener('click', ()=>{
+    try{
+      chrome.tabs.create({ url: 'http://127.0.0.1:48159/telemetry/recent' });
+    } catch {}
   });
 
   $('clearCache').addEventListener('click', async ()=>{

@@ -14,7 +14,8 @@ const DEFAULTS = {
   preUpscaleCount: 3,          // 0..5
   aiQuality: 'balanced',       // fast/balanced/best
   whitelist: {},               // {hostname:true}
-  showToast: true
+  showToast: true,
+  telemetryEnabled: false
 };
 
 let settings = { ...DEFAULTS };
@@ -61,6 +62,7 @@ let warmTimer = null;
 let warmInFlight = false;
 let preSwapBusy = false;
 let warmHostCacheUntil = new Map(); // key -> untilMs (key is getPreloadKeyForUrl(url))
+let telemetryLastSentAt = new Map(); // type -> ms
 
 const ENHANCED_PRELOAD_TTL_MS = 2 * 60 * 1000;
 const ENHANCED_PRELOAD_MAX_ENTRIES = 6;
@@ -102,6 +104,77 @@ function hostAllowed() {
 function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
 
 function log(...a){ console.log('[MangaUpscaler]', ...a); }
+
+function getRedactedPathSig(href){
+  try{
+    const u = new URL(String(href || location.href));
+    const parts = (u.pathname || '/').split('/').filter(Boolean).slice(0, 6);
+    const norm = parts.map(p => {
+      const seg = String(p || '');
+      if (/^\d+$/.test(seg)) return ':n';
+      if (/^[a-f0-9]{12,}$/i.test(seg)) return ':id';
+      if (seg.length > 22) return seg.slice(0, 8) + '…';
+      return seg.replace(/\d+/g, ':n');
+    });
+    return '/' + norm.join('/');
+  } catch {
+    return '/';
+  }
+}
+
+function getSiteProfile(){
+  if (isWeebCentral()) return 'weebcentral';
+  if (isComixReader()) return 'comix';
+  return 'generic';
+}
+
+function sendTelemetry(type, data={}, throttleMs=15000){
+  try{
+    if (!settings.telemetryEnabled) return;
+    const now = Date.now();
+    const prev = Number(telemetryLastSentAt.get(type) || 0);
+    if (prev && (now - prev) < throttleMs) return;
+    telemetryLastSentAt.set(type, now);
+
+    const host = String(location.hostname || '');
+    const pathSig = getRedactedPathSig(location.href);
+    const manifest = chrome?.runtime?.getManifest ? chrome.runtime.getManifest() : null;
+
+    const payload = {
+      v: 1,
+      ts: new Date(now).toISOString(),
+      type,
+      site: { host, pathSig, profile: getSiteProfile() },
+      ext: { version: String(manifest?.version || '') },
+      settings: {
+        autoPanel: !!settings.autoPanel,
+        preUpscaleCount: Number(settings.preUpscaleCount || 0),
+        scale: Number(settings.scale || 3),
+        aiQuality: String(settings.aiQuality || 'balanced')
+      },
+      data: data || {}
+    };
+    chrome.runtime.sendMessage({ type: 'TELEMETRY_EVENT', payload }).catch(()=>{});
+  } catch {}
+}
+
+function collectPageStats(){
+  try{
+    const imgs = Array.from(document.images || []);
+    let placeholder = 0;
+    let lazyAttr = 0;
+    let srcset = 0;
+    for (const img of imgs){
+      const u = String(img?.currentSrc || img?.src || '');
+      if (!u || u === 'about:blank' || isEmptyBase64DataUrl(u) || u.startsWith('data:image/gif')) placeholder++;
+      if ((img?.loading || '') === 'lazy') lazyAttr++;
+      if (String(img?.getAttribute?.('srcset') || '')) srcset++;
+    }
+    return { imageCount: imgs.length, placeholderCount: placeholder, loadingLazyCount: lazyAttr, srcsetCount: srcset };
+  } catch {
+    return {};
+  }
+}
 
 function isHttpUrl(url){
   return typeof url === 'string' && (url.startsWith('http://') || url.startsWith('https://'));
@@ -1266,12 +1339,15 @@ async function processImageElement(imgEl){
     let outBlob = null;
     let outContentType = '';
 
+    const t0 = performance.now();
     const ai = await enhanceViaHost(src);
     out = ai.src;
     model = ai.model;
     outIsObjectUrl = !!ai.isObjectUrl;
     outBlob = ai.blob || null;
     outContentType = ai.contentType || '';
+    const hostElapsed = Number(ai.elapsedMs || 0);
+    sendTelemetry('enhance_success', { hostElapsedMs: hostElapsed, model: String(model || ''), contentType: String(outContentType || ''), swap: outIsObjectUrl ? 'blob' : 'data' }, 8000);
 
     const setAndWait = async (newSrc, isObj) => {
       replaceImgSrc(imgEl, newSrc, isObj);
@@ -1326,6 +1402,7 @@ async function processImageElement(imgEl){
       const backoff = msg.includes('decode') ? 60000 : 15000;
       imgEl.dataset.muFailUntil = String(Date.now() + backoff);
     } catch {}
+    sendTelemetry('enhance_fail', { err: String(e?.message || e || '').slice(0, 220) }, 6000);
     throw e;
   } finally {
     clearTimeout(overlayTimer);
@@ -1579,6 +1656,11 @@ function startAuto(){
   mo.observe(document.documentElement, { childList: true, subtree: true });
 
   schedule();
+
+  // Page-level diagnostics (opt-in, low frequency).
+  try{
+    sendTelemetry('page_profile', collectPageStats(), 60000);
+  } catch {}
 }
 
 // ---------- Messaging ----------

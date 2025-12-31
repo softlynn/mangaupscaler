@@ -66,6 +66,7 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 WRAPPED_DIR = os.path.join(CACHE_DIR, "wrapped_models")
 os.makedirs(WRAPPED_DIR, exist_ok=True)
 LOG_PATH = os.path.join(ROOT, "host.log")
+TELEMETRY_PATH = os.path.join(ROOT, "telemetry.log")
 
 DEFAULT_CFG = {
   "auto_scan_models": True,
@@ -246,6 +247,45 @@ def _log(msg: str) -> None:
       f.write(f"[{ts}] {msg}\n")
   except Exception:
     pass
+
+def _append_telemetry(obj: dict) -> None:
+  try:
+    # Bound file size (~5MB) to avoid unbounded growth.
+    try:
+      if os.path.exists(TELEMETRY_PATH) and os.path.getsize(TELEMETRY_PATH) > (5 * 1024 * 1024):
+        bak = TELEMETRY_PATH + ".1"
+        try:
+          if os.path.exists(bak):
+            os.remove(bak)
+        except Exception:
+          pass
+        try:
+          os.replace(TELEMETRY_PATH, bak)
+        except Exception:
+          pass
+    except Exception:
+      pass
+
+    with open(TELEMETRY_PATH, "a", encoding="utf-8") as f:
+      f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+  except Exception:
+    pass
+
+def _read_recent_telemetry(max_lines: int = 200) -> list[dict]:
+  out: list[dict] = []
+  try:
+    if not os.path.exists(TELEMETRY_PATH):
+      return out
+    with open(TELEMETRY_PATH, "r", encoding="utf-8", errors="ignore") as f:
+      lines = f.read().splitlines()
+    for line in lines[-max_lines:]:
+      try:
+        out.append(json.loads(line))
+      except Exception:
+        continue
+  except Exception:
+    return out
+  return out
 
 # Lazy-loaded model (kept in memory)
 _engine = None
@@ -923,6 +963,10 @@ class Handler(BaseHTTPRequestHandler):
   def do_GET(self):
     try:
       parsed = urllib.parse.urlparse(self.path)
+      if parsed.path == "/telemetry/recent":
+        items = _read_recent_telemetry(200)
+        body = json.dumps({"ok": True, "items": items}, ensure_ascii=False).encode("utf-8")
+        return self._send(200, body, "application/json")
       if parsed.path == "/health":
         return self._send(200, b"ok")
       if parsed.path == "/status":
@@ -979,6 +1023,18 @@ class Handler(BaseHTTPRequestHandler):
   def do_POST(self):
     try:
       parsed = urllib.parse.urlparse(self.path)
+      if parsed.path == "/telemetry":
+        if self.client_address[0] not in ("127.0.0.1", "::1"):
+          return self._send(403, b"forbidden")
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0:
+          return self._send(400, b"missing body")
+        try:
+          payload = json.loads(self.rfile.read(length))
+        except Exception:
+          return self._send(400, b"invalid json")
+        _append_telemetry(payload if isinstance(payload, dict) else {"payload": payload})
+        return self._send(200, b"ok")
       if parsed.path == "/shutdown":
         if self.client_address[0] not in ("127.0.0.1", "::1"):
           return self._send(403, b"forbidden")
