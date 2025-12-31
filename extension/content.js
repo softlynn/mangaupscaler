@@ -667,10 +667,19 @@ async function enhanceViaHost(srcUrl, opts={}){
     const out = new Uint8Array(total);
     let offset = 0;
     for (let i = 0; i < chunkCount; i++) {
-      const r = await chrome.runtime.sendMessage({ type: 'AI_STREAM_CHUNK', streamId, index: i });
+      let r = await chrome.runtime.sendMessage({ type: 'AI_STREAM_CHUNK', streamId, index: i });
       if (!r?.ok) throw new Error(r?.error || 'Stream chunk failed');
-      const ab = normalizeToArrayBuffer(r.chunk);
-      if (!ab) throw new Error('Invalid stream chunk');
+      let ab = normalizeToArrayBuffer(r.chunk);
+      if (!ab && r?.b64) {
+        ab = base64ToArrayBuffer(r.b64);
+      }
+      if (!ab) {
+        // Retry via base64 transport as a last resort (slower but very robust).
+        const r2 = await chrome.runtime.sendMessage({ type: 'AI_STREAM_CHUNK_B64', streamId, index: i });
+        if (!r2?.ok) throw new Error(r2?.error || 'Stream chunk failed');
+        if (!r2?.b64) throw new Error('Invalid stream chunk');
+        ab = base64ToArrayBuffer(r2.b64);
+      }
       const u8 = new Uint8Array(ab);
       out.set(u8, offset);
       offset += u8.length;

@@ -71,7 +71,8 @@ function storeAiStream({ buffer, contentType, model, hostError, elapsedMs }){
     createdAt: Date.now()
   };
   aiStreamStore.set(id, entry);
-  setTimeout(() => aiStreamStore.delete(id), 60_000);
+  // Keep for a while; host inference can be slow and the service worker can be busy.
+  setTimeout(() => aiStreamStore.delete(id), 5 * 60_000);
   return { id, chunkCount: chunks.length };
 }
 
@@ -332,7 +333,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (!Number.isFinite(i) || i < 0) throw new Error('Invalid chunk index');
         const chunk = entry.chunks[i];
         if (!chunk) throw new Error('Chunk not found');
-        sendResponse({ ok: true, chunk, index: i, last: (i === entry.chunks.length - 1) });
+        // TypedArray clones more reliably than raw ArrayBuffer in some Chrome builds.
+        const u8 = new Uint8Array(chunk);
+        sendResponse({ ok: true, chunk: u8, index: i, last: (i === entry.chunks.length - 1) });
+        return;
+      }
+
+      if (msg?.type === 'AI_STREAM_CHUNK_B64') {
+        const { streamId, index } = msg || {};
+        const entry = aiStreamStore.get(String(streamId || ''));
+        if (!entry) throw new Error('Unknown stream');
+        const i = Number(index || 0);
+        if (!Number.isFinite(i) || i < 0) throw new Error('Invalid chunk index');
+        const chunk = entry.chunks[i];
+        if (!chunk) throw new Error('Chunk not found');
+        const b64 = arrayBufferToBase64(chunk);
+        sendResponse({ ok: true, b64, index: i, last: (i === entry.chunks.length - 1) });
         return;
       }
 
@@ -435,4 +451,14 @@ function dataUrlToBytes(dataUrl) {
   const bytes = new Uint8Array(len);
   for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
   return { bytes, contentType };
+}
+
+function arrayBufferToBase64(buffer){
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
 }
