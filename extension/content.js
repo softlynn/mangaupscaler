@@ -50,6 +50,12 @@ let lastHostStartAt = 0;
 let canvasOverlays = new WeakMap(); // WeakMap<img, { wrapper: HTMLElement, canvas: HTMLCanvasElement }>
 let preloadStatus = { target: 0, preloaded: 0, prefetched: 0, updatedAt: 0, currentUrl: '' };
 let pagePrefetch = new Map(); // url -> untilMs
+let enhancedPreloadCache = new Map(); // key -> { blob, contentType, model, byteLength, createdAt, lastUsedAt }
+let enhancedPreloadTotalBytes = 0;
+
+const ENHANCED_PRELOAD_TTL_MS = 2 * 60 * 1000;
+const ENHANCED_PRELOAD_MAX_ENTRIES = 6;
+const ENHANCED_PRELOAD_MAX_BYTES = 140 * 1024 * 1024; // ~140MB
 
 // ---------- Settings ----------
 async function loadSettings() {
@@ -832,6 +838,37 @@ function getPreloadKeyForUrl(url){
   return `${url}::s=${scale}::q=${quality}::f=${format}`;
 }
 
+function _evictEnhancedPreloadIfNeeded(){
+  const now = Date.now();
+  for (const [k, v] of enhancedPreloadCache) {
+    if (!v?.createdAt || (now - Number(v.createdAt || 0)) > ENHANCED_PRELOAD_TTL_MS) {
+      enhancedPreloadTotalBytes -= Number(v?.byteLength || 0);
+      enhancedPreloadCache.delete(k);
+    }
+  }
+
+  while (enhancedPreloadCache.size > ENHANCED_PRELOAD_MAX_ENTRIES || enhancedPreloadTotalBytes > ENHANCED_PRELOAD_MAX_BYTES) {
+    let oldestKey = null;
+    let oldestAt = Infinity;
+    for (const [k, v] of enhancedPreloadCache) {
+      const t = Number(v?.lastUsedAt || v?.createdAt || 0);
+      if (t < oldestAt) { oldestAt = t; oldestKey = k; }
+    }
+    if (!oldestKey) break;
+    const v = enhancedPreloadCache.get(oldestKey);
+    enhancedPreloadTotalBytes -= Number(v?.byteLength || 0);
+    enhancedPreloadCache.delete(oldestKey);
+  }
+}
+
+function getEnhancedPreloadEntry(key){
+  _evictEnhancedPreloadIfNeeded();
+  const v = enhancedPreloadCache.get(key);
+  if (!v) return null;
+  v.lastUsedAt = Date.now();
+  return v;
+}
+
 function touchPagePreload(imgEl, url){
   // Try to make upcoming panels load visually sooner without swapping anything to blob/data.
   // 1) Prefer browser-native lazyload hints.
@@ -887,6 +924,63 @@ function scheduleAfterCooldown(preload){
     cooldownRetryTimer = null;
     processOnce(cooldownRetryPreload, true).catch(()=>{});
   }, waitMs);
+}
+
+async function fetchEnhancedBlobForUrl(srcUrl, opts={}){
+  const scale = clamp(Number(settings.scale || 3), 2, 4);
+  const quality = String(settings.aiQuality || 'balanced');
+  const format = String(opts.format || 'webp');
+
+  const resp = await chrome.runtime.sendMessage({
+    type: 'FETCH_AI_ENHANCE',
+    sourceUrl: srcUrl,
+    scale,
+    quality,
+    format
+  });
+  if (!resp?.ok) throw new Error(resp?.error || 'AI host not available');
+  if (resp.hostError) throw new Error(resp.hostError);
+
+  const contentType = String(resp.contentType || 'image/png');
+
+  if (resp.streamId) {
+    const streamId = String(resp.streamId || '');
+    const chunkCount = Number(resp.chunkCount || 0);
+    const total = Number(resp.byteLength || 0);
+    if (!streamId || !chunkCount || !total) throw new Error('AI returned invalid stream');
+
+    const out = new Uint8Array(total);
+    let offset = 0;
+    for (let i = 0; i < chunkCount; i++) {
+      let r = await chrome.runtime.sendMessage({ type: 'AI_STREAM_CHUNK', streamId, index: i });
+      if (!r?.ok) throw new Error(r?.error || 'Stream chunk failed');
+      let ab = normalizeToArrayBuffer(r.chunk);
+      if (!ab && r?.b64) ab = base64ToArrayBuffer(r.b64);
+      if (!ab) {
+        const r2 = await chrome.runtime.sendMessage({ type: 'AI_STREAM_CHUNK_B64', streamId, index: i });
+        if (!r2?.ok) throw new Error(r2?.error || 'Stream chunk failed');
+        if (!r2?.b64) throw new Error('Invalid stream chunk');
+        ab = base64ToArrayBuffer(r2.b64);
+      }
+      const u8 = new Uint8Array(ab);
+      out.set(u8, offset);
+      offset += u8.length;
+    }
+    chrome.runtime.sendMessage({ type: 'AI_STREAM_DELETE', streamId }).catch(()=>{});
+    const blob = new Blob([out.buffer.slice(0, offset)], { type: contentType });
+    if (!blob.size) throw new Error('AI returned empty image');
+    return { blob, contentType, model: String(resp.model || '') };
+  }
+
+  if (resp.buffer) {
+    const ab = normalizeToArrayBuffer(resp.buffer);
+    if (!ab) throw new Error('AI returned invalid payload');
+    const blob = new Blob([ab], { type: contentType });
+    if (!blob.size) throw new Error('AI returned empty image');
+    return { blob, contentType, model: String(resp.model || '') };
+  }
+
+  throw new Error('AI returned invalid payload');
 }
 
 function bumpAiBurstAndMaybeCooldown(countForCooldown, preload){
@@ -958,32 +1052,40 @@ async function preloadAiForImage(imgEl){
   const src = getBestImageUrl(imgEl);
   if (!src || !isHttpUrl(src) || isEmptyBase64DataUrl(src)) return false;
 
-  const scale = clamp(Number(settings.scale || 3), 2, 4);
-  const quality = String(settings.aiQuality || 'balanced');
-  const format = 'webp';
+  // This is "pre-upscale": fetch the enhanced output ahead of time so it can be swapped in instantly.
+  // The host will still cache it on disk.
+  if (Date.now() < aiHostDownUntil) throw new Error('AI host cooldown');
 
-  const key = `${src}::s=${scale}::q=${quality}::f=${format}`;
+  const key = getPreloadKeyForUrl(src);
   const prevKey = String(imgEl.dataset?.muPreloadKey || '');
   const until = Number(imgEl.dataset?.muPreloadUntil || 0);
-  if (prevKey === key && until && Date.now() < until) return true;
+  if (prevKey === key && until && Date.now() < until && getEnhancedPreloadEntry(key)) return true;
 
   imgEl.dataset.muPreloadKey = key;
-  imgEl.dataset.muPreloadUntil = String(Date.now() + 20000);
+  imgEl.dataset.muPreloadUntil = String(Date.now() + ENHANCED_PRELOAD_TTL_MS);
 
   // Preload the actual page image too (so scrolling doesn't show blank placeholders).
   prefetchUrl(src);
   touchPagePreload(imgEl, src);
 
-  maybeStartHost('preload');
-  const resp = await chrome.runtime.sendMessage({
-    type: 'AI_PRELOAD',
-    sourceUrl: src,
-    scale,
-    quality,
-    format
-  });
-  if (!resp?.ok) throw new Error(resp?.error || 'Preload failed');
-  if (resp.hostError) throw new Error(resp.hostError);
+  maybeStartHost('preload_fetch');
+  const out = await fetchEnhancedBlobForUrl(src, { format: 'webp' });
+
+  _evictEnhancedPreloadIfNeeded();
+  const prev = enhancedPreloadCache.get(key);
+  if (prev) enhancedPreloadTotalBytes -= Number(prev.byteLength || 0);
+
+  const entry = {
+    blob: out.blob,
+    contentType: out.contentType,
+    model: out.model,
+    byteLength: Number(out.blob.size || 0),
+    createdAt: Date.now(),
+    lastUsedAt: Date.now()
+  };
+  enhancedPreloadCache.set(key, entry);
+  enhancedPreloadTotalBytes += entry.byteLength;
+  _evictEnhancedPreloadIfNeeded();
   return true;
 }
 
@@ -997,7 +1099,7 @@ function computePreloadStatus(currentImg){
     if (!url || !isHttpUrl(url)) continue;
     const key = getPreloadKeyForUrl(url);
     const ok = (String(ni.dataset?.muPreloadKey || '') === key) && (Number(ni.dataset?.muPreloadUntil || 0) > Date.now());
-    if (ok) preloaded++;
+    if (ok && getEnhancedPreloadEntry(key)) preloaded++;
     const u2 = pagePrefetch.get(url) || 0;
     if (u2 && Date.now() < u2) prefetched++;
   }
@@ -1008,6 +1110,56 @@ function computePreloadStatus(currentImg){
     updatedAt: Date.now(),
     currentUrl: String(getBestImageUrl(currentImg) || '')
   };
+}
+
+function isNearViewport(imgEl){
+  try{
+    const r = imgEl.getBoundingClientRect();
+    const vh = window.innerHeight || 1;
+    return (r.top < vh * 1.25) && (r.bottom > -vh * 0.25);
+  } catch {
+    return false;
+  }
+}
+
+async function applyEnhancedCacheIfReady(imgEl, opts={}){
+  if (!imgEl) return false;
+  if (imgEl.dataset?.muUpscaled === '1') return false;
+  const src = getBestImageUrl(imgEl);
+  if (!src || !isHttpUrl(src)) return false;
+  const key = getPreloadKeyForUrl(src);
+  const entry = getEnhancedPreloadEntry(key);
+  if (!entry?.blob) return false;
+
+  // Ensure the page is also loading this image (prevents "blank page" while scrolling).
+  prefetchUrl(src);
+  touchPagePreload(imgEl, src);
+
+  if (!opts.force && !isNearViewport(imgEl)) return false;
+
+  const outBlob = entry.blob;
+  const objectUrl = URL.createObjectURL(outBlob);
+
+  const setAndWait = async (newSrc, isObj) => {
+    replaceImgSrc(imgEl, newSrc, isObj);
+    await waitForImageLoad(imgEl, 20000);
+  };
+
+  try{
+    await setAndWait(objectUrl, true);
+  } catch {
+    try { restoreImg(imgEl); } catch {}
+    try{
+      const dataUrl = await blobToDataURL(outBlob);
+      await setAndWait(dataUrl, false);
+    } catch {
+      await renderBlobOverImage(imgEl, outBlob);
+    }
+  }
+
+  imgEl.dataset.muUpscaled = '1';
+  // No sparkle/toast: preloaded swaps should feel invisible.
+  return true;
 }
 
 async function processImageElement(imgEl){
@@ -1140,10 +1292,9 @@ async function processOnce(preload, showStatus){
       const next = getNextCandidateImages(img, nextCount);
       for (const ni of next){
         try{
-          // AI preload: warm the host disk cache without touching page DOM (prevents flicker + CSP issues).
+          // Pre-upscale: fetch enhanced outputs now, so the next panels are already swapped before you see them.
           await preloadAiForImage(ni);
-          // Don't trigger cooldown from preloads; only from actual on-screen enhances.
-          if (shouldBurstLimit && bumpAiBurstAndMaybeCooldown(false, preload)) return;
+          try { await applyEnhancedCacheIfReady(ni); } catch {}
         }catch(e){
           const msg = String(e?.message || e || '');
           if (msg.includes('AI host cooldown')) {
@@ -1161,6 +1312,15 @@ async function processOnce(preload, showStatus){
 
     // Update status after each cycle (so popup can show progress).
     try { computePreloadStatus(img); } catch {}
+
+    // Apply any already-preloaded next panels that are near the viewport.
+    try{
+      const t = clamp(Number(settings.preUpscaleCount||0), 0, 5);
+      const next = getNextCandidateImages(img, t);
+      for (const ni of next){
+        try { await applyEnhancedCacheIfReady(ni); } catch {}
+      }
+    } catch {}
   } catch(e){
     log('Enhance failed:', e);
     const msg = String(e?.message || e || '').slice(0, 120);
@@ -1191,6 +1351,17 @@ function startAuto(){
     // Don't spam: only run if current visible image not yet processed
     const img = findBestVisibleImage();
     if (!img) return;
+
+    // If we already pre-upscaled this (or a nearby next panel), swap it in before it becomes visible.
+    try{
+      applyEnhancedCacheIfReady(img).catch(()=>{});
+      const t = clamp(Number(settings.preUpscaleCount||0), 0, 5);
+      const next = getNextCandidateImages(img, t);
+      for (const ni of next){
+        if (isNearViewport(ni)) applyEnhancedCacheIfReady(ni).catch(()=>{});
+      }
+    } catch {}
+
     if (img.dataset.muUpscaled === '1') {
       // Even if current is already upscaled, keep preloading ahead as the user scrolls.
       const k = img.dataset.muOriginalSrc || img.currentSrc || img.src || '';
