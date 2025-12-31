@@ -781,7 +781,7 @@ def _download_models(allow_dat2: bool) -> dict:
   extra_model = "2x_IllustrationJaNai_V1_ESRGAN_120k.pth"
   extra_path = os.path.join(MODELS_DIR, extra_model)
   if not os.path.exists(extra_path):
-    extra_url = os.environ.get("MU_ILLU_2X_URL") or f"https://github.com/softlynn/mangaupscaler/releases/download/v0.2.2-alpha/{extra_model}"
+    extra_url = os.environ.get("MU_ILLU_2X_URL") or f"https://github.com/softlynn/mangaupscaler/releases/download/alpha/{extra_model}"
     try:
       _log(f"Downloading extra model {extra_model}")
       with requests.get(extra_url, stream=True, timeout=240) as resp:

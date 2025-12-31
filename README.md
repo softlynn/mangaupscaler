@@ -22,8 +22,8 @@ Chromium bases browsers are best, but firefox/brave may need some tweaking.
 - 🖥️ Tray app with logs + cache tools (green dot while enhancing)
 
 ## ⬇️ Downloads (Windows)
-- 🖥️ Host installer: [MangaUpscalerHostSetup.exe](https://github.com/softlynn/mangaupscaler/releases/download/v0.2.2-alpha/MangaUpscalerHostSetup.exe)
-- 🧩 Chrome extension: [MangaUpscalerExtension.zip](https://github.com/softlynn/mangaupscaler/releases/download/v0.2.2-alpha/MangaUpscalerExtension.zip)
+- 🖥️ Host installer: [MangaUpscalerHostSetup.exe](https://github.com/softlynn/mangaupscaler/releases/download/alpha/MangaUpscalerHostSetup.exe)
+- 🧩 Chrome extension: [MangaUpscalerExtension.zip](https://github.com/softlynn/mangaupscaler/releases/download/alpha/MangaUpscalerExtension.zip)
 
 ## 🧰 Install (Windows, recommended)
 ### 1) Add the extension (unpacked) 🧩
