@@ -27,6 +27,11 @@
     }
   },
   "illustration_by_quality": {
+    "2": {
+      "fast": "2x_IllustrationJaNai_V1_ESRGAN_120k.pth",
+      "balanced": "2x_IllustrationJaNai_V1_ESRGAN_120k.pth",
+      "best": "2x_IllustrationJaNai_V1_ESRGAN_120k.pth"
+    },
     "4": {
       "fast": "4x_IllustrationJaNai_V1_ESRGAN_135k.pth",
       "balanced": "4x_IllustrationJaNai_V1_ESRGAN_135k.pth",

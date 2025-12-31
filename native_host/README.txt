@@ -1,9 +1,8 @@
-Manga Upscaler - Optional AI / RTX Local Enhancer (Advanced)
+Manga Upscaler - Local AI Host (Windows)
 
 Why this exists:
-- Browser-only enhancement is fast and works everywhere, but it can't match true AI upscalers.
-- This optional local host lets the extension send the current panel to a local program that can run
-  Real-ESRGAN / waifu2x / RTX Video Super Resolution-like pipelines on your GPU.
+- The extension relies on a local AI host for upscaling (MangaJaNai / IllustrationJaNai via Real-ESRGAN).
+- The host runs locally so the browser stays lightweight.
 
 What's included here:
 - native_messaging_manifest.template.json  (template for native messaging registration)
@@ -16,10 +15,11 @@ What's included here:
 - installer/           (Inno Setup script for a packaged installer)
 
 What is NOT included:
-- AI models. Install via install_windows.ps1 or the Settings "Download models" button.
+- Most AI models are downloaded during install; some optional models may be hosted in project releases.
 
 Notes:
 - install_windows.ps1 attempts to auto-detect the unpacked extension ID from Chrome profiles.
+- Optional: set `MU_ILLU_2X_URL` to override where the 2x IllustrationJaNai model downloads from.
 
 Build the installer:
 1) Run: .\build_exe.ps1

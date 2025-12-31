@@ -3,11 +3,8 @@ const DEFAULTS = {
   autoPanel: true,
   scale: 3,
   preUpscaleCount: 1,
-  sharpenStrength: 0.40,
-  denoiseStrength: 0.15,
   whitelist: {}, // { "example.com": true }
   showToast: true,
-  watermark: true,
   aiMode: true,
   aiQuality: 'balanced'
 };
@@ -20,10 +17,6 @@ const siteToggle = $('siteToggle');
 const scale = $('scale');
 const pre = $('pre');
 const preN = $('preN');
-const sharp = $('sharp');
-const sharpVal = $('sharpVal');
-const denoise = $('denoise');
-const dnVal = $('dnVal');
 const run = $('run');
 const runPrimary = $('runPrimary');
 
@@ -62,8 +55,7 @@ function setRowDisabled(el, on){
 function applySiteLock(allowed){
   siteLocked = !allowed;
   [enabledToggle, autoToggle, aiMode].forEach(t => t.classList.toggle('locked', siteLocked));
-  [scale, pre, sharp, denoise, aiQuality].forEach(el => setControlDisabled(el, siteLocked));
-  [run, runPrimary].forEach(btn => { if (btn) btn.disabled = siteLocked; });
+  [scale, pre, aiQuality].forEach(el => setControlDisabled(el, siteLocked));
   if (siteLocked){
     setToggle(enabledToggle, false);
     if (siteStatus) siteStatus.textContent = 'Disabled on this site. Toggle "Only on this site" to enable.';
@@ -75,11 +67,11 @@ function applySiteLock(allowed){
 function applyAiModeState(on){
   const isOn = !!on;
   setControlDisabled(aiQuality, siteLocked || !isOn);
-  setRowDisabled(sharp, siteLocked || isOn);
-  setRowDisabled(denoise, siteLocked || isOn);
-  if (!siteLocked){
-    sharp.disabled = isOn;
-    denoise.disabled = isOn;
+  setControlDisabled(scale, siteLocked || !isOn);
+  setControlDisabled(pre, siteLocked || !isOn);
+  [run, runPrimary].forEach(btn => { if (btn) btn.disabled = siteLocked || !isOn; });
+  if (!siteLocked && siteStatus) {
+    siteStatus.textContent = isOn ? '' : 'AI enhance is off. Turn it on to enhance panels.';
   }
 }
 
@@ -107,12 +99,6 @@ async function load(){
   pre.value = String(s.preUpscaleCount ?? 0);
   preN.textContent = String(s.preUpscaleCount ?? 0);
   runPrimary.textContent = `Enhance + Preload ${Number(s.preUpscaleCount ?? 0)}`;
-
-  sharp.value = String(s.sharpenStrength ?? 0.4);
-  sharpVal.textContent = Number(s.sharpenStrength ?? 0.4).toFixed(2);
-
-  denoise.value = String(s.denoiseStrength ?? 0.15);
-  dnVal.textContent = Number(s.denoiseStrength ?? 0.15).toFixed(2);
 
   const wh = s.whitelist || {};
   const siteOn = currentHost ? !!wh[currentHost] : false;
@@ -201,20 +187,6 @@ pre.addEventListener('input', async ()=>{
   preN.textContent = pre.value;
   runPrimary.textContent = `Enhance + Preload ${Number(pre.value)}`;
   await save({preUpscaleCount: Number(pre.value)});
-  await sendCommand({type:'SETTINGS_UPDATED'});
-});
-
-sharp.addEventListener('input', async ()=>{
-  if (siteLocked) return;
-  sharpVal.textContent = Number(sharp.value).toFixed(2);
-  await save({sharpenStrength: Number(sharp.value)});
-  await sendCommand({type:'SETTINGS_UPDATED'});
-});
-
-denoise.addEventListener('input', async ()=>{
-  if (siteLocked) return;
-  dnVal.textContent = Number(denoise.value).toFixed(2);
-  await save({denoiseStrength: Number(denoise.value)});
   await sendCommand({type:'SETTINGS_UPDATED'});
 });
 

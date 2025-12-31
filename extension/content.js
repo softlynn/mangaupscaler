@@ -1,9 +1,9 @@
 // Manga Upscaler content script (v1.1.0)
 // Enhances the currently visible manga panel (largest visible image) by:
 // 1) fetching the image data safely (via background to avoid CORS taint)
-// 2) upscaling with progressive high-quality resampling
-// 3) denoise + unsharp mask for crisp text/screentones
-// 4) optional tiny watermark + sparkle + toast
+// 2) sending it to the local AI host (MangaJaNai / IllustrationJaNai)
+// 3) rendering the result with CSP-safe fallbacks (blob/data/canvas overlay)
+// 4) sparkle + toast
 
 const AI_HOST = 'http://127.0.0.1:48159';
 
@@ -12,13 +12,9 @@ const DEFAULTS = {
   autoPanel: true,
   scale: 3,
   preUpscaleCount: 1,          // 0..4
-  sharpenStrength: 0.40,       // 0..1
-  denoiseStrength: 0.15,       // 0..0.6
-  quality: 'high',             // low/medium/high (canvas hint)
   aiQuality: 'balanced',       // fast/balanced/best
   whitelist: {},               // {hostname:true}
   showToast: true,
-  watermark: true,
   aiMode: true
 };
 
@@ -567,156 +563,7 @@ async function decodeBlobToBitmap(blob){
   throw new Error(`AI image decode failed: ${errs.join(' | ')}`);
 }
 
-// ---------- Enhancement pipeline ----------
-function upscaleCanvas(srcImg, scale){
-  const w = srcImg.naturalWidth || srcImg.width;
-  const h = srcImg.naturalHeight || srcImg.height;
-
-  // Progressive upscaling reduces blur vs 1 big step.
-  const steps = [];
-  let current = 1;
-  while (current < scale){
-    const next = Math.min(scale, current * 1.5);
-    steps.push(next);
-    current = next;
-  }
-
-  let canvas = document.createElement('canvas');
-  canvas.width = w;
-  canvas.height = h;
-  let ctx = canvas.getContext('2d', { willReadFrequently: true });
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = settings.quality || 'high';
-  ctx.drawImage(srcImg, 0, 0);
-
-  for (const s of steps){
-    const tmp = document.createElement('canvas');
-    tmp.width = Math.round(w * s);
-    tmp.height = Math.round(h * s);
-    const tctx = tmp.getContext('2d', { willReadFrequently: true });
-    tctx.imageSmoothingEnabled = true;
-    tctx.imageSmoothingQuality = settings.quality || 'high';
-    tctx.drawImage(canvas, 0, 0, tmp.width, tmp.height);
-    canvas = tmp;
-    ctx = tctx;
-  }
-  return canvas;
-}
-
-function gaussianBlur3x3(imgData){
-  // Lightweight blur for unsharp mask base (approx gaussian).
-  const { data, width, height } = imgData;
-  const out = new Uint8ClampedArray(data.length);
-  const w = width, h = height;
-  const k = [1,2,1, 2,4,2, 1,2,1];
-  const ks = 16;
-
-  for (let y=0;y<h;y++){
-    for (let x=0;x<w;x++){
-      let r=0,g=0,b=0,a=0, ki=0;
-      for (let j=-1;j<=1;j++){
-        const yy = clamp(y+j, 0, h-1);
-        for (let i=-1;i<=1;i++){
-          const xx = clamp(x+i, 0, w-1);
-          const idx = (yy*w + xx)*4;
-          const kv = k[ki++];
-          r += data[idx]*kv;
-          g += data[idx+1]*kv;
-          b += data[idx+2]*kv;
-          a += data[idx+3]*kv;
-        }
-      }
-      const o = (y*w + x)*4;
-      out[o]   = r/ks;
-      out[o+1] = g/ks;
-      out[o+2] = b/ks;
-      out[o+3] = a/ks;
-    }
-  }
-  return new ImageData(out, width, height);
-}
-
-function medianDenoise3x3(imgData, strength){
-  // Very mild median on luma, blended back (helps JPEG blocks / scan noise).
-  if (strength <= 0) return imgData;
-  const { data, width, height } = imgData;
-  const out = new Uint8ClampedArray(data.length);
-  const w = width, h = height;
-
-  const lum = (r,g,b)=> (0.2126*r + 0.7152*g + 0.0722*b);
-
-  for (let y=0;y<h;y++){
-    for (let x=0;x<w;x++){
-      const lums = [];
-      const idxs = [];
-      for (let j=-1;j<=1;j++){
-        const yy = clamp(y+j,0,h-1);
-        for (let i=-1;i<=1;i++){
-          const xx = clamp(x+i,0,w-1);
-          const idx = (yy*w+xx)*4;
-          idxs.push(idx);
-          lums.push(lum(data[idx], data[idx+1], data[idx+2]));
-        }
-      }
-      // median index
-      const sorted = lums.map((v,ii)=>[v,ii]).sort((a,b)=>a[0]-b[0]);
-      const mid = sorted[4][1];
-      const mIdx = idxs[mid];
-
-      const o = (y*w+x)*4;
-      // blend towards median pixel
-      out[o]   = data[o]   + (data[mIdx]   - data[o])   * strength;
-      out[o+1] = data[o+1] + (data[mIdx+1] - data[o+1]) * strength;
-      out[o+2] = data[o+2] + (data[mIdx+2] - data[o+2]) * strength;
-      out[o+3] = data[o+3];
-    }
-  }
-  return new ImageData(out, width, height);
-}
-
-function unsharpMask(imgData, blurred, amount){
-  if (amount <= 0) return imgData;
-  const { data, width, height } = imgData;
-  const b = blurred.data;
-  const out = new Uint8ClampedArray(data.length);
-
-  // Edge-aware-ish: apply more where difference is stronger.
-  for (let i=0;i<data.length;i+=4){
-    const dr = data[i]   - b[i];
-    const dg = data[i+1] - b[i+1];
-    const db = data[i+2] - b[i+2];
-    const diff = Math.abs(dr) + Math.abs(dg) + Math.abs(db); // 0..765
-    const edge = clamp(diff / 220, 0, 1); // emphasis for text/lines
-    const a = amount * (0.35 + 0.65*edge);
-
-    out[i]   = clamp(data[i]   + dr*a, 0, 255);
-    out[i+1] = clamp(data[i+1] + dg*a, 0, 255);
-    out[i+2] = clamp(data[i+2] + db*a, 0, 255);
-    out[i+3] = data[i+3];
-  }
-  return new ImageData(out, width, height);
-}
-
-async function applyWatermark(ctx, canvas){
-  if (!settings.watermark) return;
-  try{
-    const url = chrome.runtime.getURL('assets/creator.png');
-    const dataUrl = await fetch(url).then(r=>r.blob()).then(blobToDataURL);
-    const im = await loadImage(dataUrl);
-
-    const pad = Math.max(10, Math.round(canvas.width * 0.012));
-    const size = Math.max(22, Math.round(canvas.width * 0.035)); // tiny
-    ctx.save();
-    ctx.globalAlpha = 0.10;
-    ctx.beginPath();
-    ctx.roundRect(canvas.width - pad - size, canvas.height - pad - size, size, size, Math.round(size/3));
-    ctx.clip();
-    ctx.drawImage(im, canvas.width - pad - size, canvas.height - pad - size, size, size);
-    ctx.restore();
-  } catch {
-    // ignore
-  }
-}
+// ---------- AI enhancement ----------
 
 function blobToDataURL(blob){
   return new Promise((resolve,reject)=>{
@@ -725,32 +572,6 @@ function blobToDataURL(blob){
     r.onerror = ()=>reject(r.error);
     r.readAsDataURL(blob);
   });
-}
-
-async function enhanceToDataURL(dataUrl){
-  const img = await loadImage(dataUrl);
-  const scale = clamp(Number(settings.scale || 3), 2, 4);
-
-  const canvas = upscaleCanvas(img, scale);
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-
-  // Read pixels
-  let id = ctx.getImageData(0,0,canvas.width,canvas.height);
-
-  // Denoise
-  id = medianDenoise3x3(id, clamp(Number(settings.denoiseStrength||0), 0, 0.6));
-
-  // Blur for unsharp
-  const blurred = gaussianBlur3x3(id);
-
-  // Sharpen
-  id = unsharpMask(id, blurred, clamp(Number(settings.sharpenStrength||0), 0, 1));
-
-  ctx.putImageData(id, 0, 0);
-
-  await applyWatermark(ctx, canvas);
-
-  return canvas.toDataURL('image/png');
 }
 
 async function enhanceViaHost(srcUrl, opts={}){
@@ -902,6 +723,20 @@ function restoreImg(imgEl){
   delete imgEl.dataset.muUpscaled;
 }
 
+function restoreAllUpscaledImages(){
+  try{
+    const imgs = Array.from(document.images || []);
+    for (const img of imgs){
+      if (!img) continue;
+      const wasUpscaled = img.dataset?.muUpscaled === '1' || !!img.dataset?.muOriginalSrc;
+      if (!wasUpscaled) continue;
+      try { restoreImg(img); } catch {}
+      try { clearCanvasOverlay(img); } catch {}
+      try { delete img.dataset.muFailUntil; } catch {}
+    }
+  } catch {}
+}
+
 function scheduleAfterCooldown(preload){
   cooldownRetryPreload = !!preload;
   if (cooldownRetryTimer) return;
@@ -995,7 +830,7 @@ async function processImageElement(imgEl){
   const rect = imgEl.getBoundingClientRect();
   let removeOverlay = null;
   let overlayTimer = setTimeout(()=>{
-    removeOverlay = showOverlay(rect, settings.aiMode ? 'AI enhancing…' : 'Enhancing…');
+    removeOverlay = showOverlay(rect, 'AI enhancing…');
   }, 650);
 
   let model = '';
@@ -1005,17 +840,12 @@ async function processImageElement(imgEl){
     let outBlob = null;
     let outContentType = '';
 
-    if (settings.aiMode) {
-      const ai = await enhanceViaHost(src);
-      out = ai.src;
-      model = ai.model;
-      outIsObjectUrl = !!ai.isObjectUrl;
-      outBlob = ai.blob || null;
-      outContentType = ai.contentType || '';
-    } else {
-      const data = await fetchImageAsDataURL(src);
-      out = await enhanceToDataURL(data);
-    }
+    const ai = await enhanceViaHost(src);
+    out = ai.src;
+    model = ai.model;
+    outIsObjectUrl = !!ai.isObjectUrl;
+    outBlob = ai.blob || null;
+    outContentType = ai.contentType || '';
 
     const setAndWait = async (newSrc, isObj) => {
       replaceImgSrc(imgEl, newSrc, isObj);
@@ -1026,7 +856,7 @@ async function processImageElement(imgEl){
       await setAndWait(out, outIsObjectUrl);
     } catch (e1) {
       // If blob: is blocked by CSP, fall back to data: generated from the Blob.
-      if (settings.aiMode && outIsObjectUrl && outBlob) {
+      if (outIsObjectUrl && outBlob) {
         // Restore original <img> state first (so we don't leave a broken blob: src behind),
         // then either try data: or draw into a <canvas> overlay if CSP blocks both.
         try { restoreImg(imgEl); } catch {}
@@ -1080,19 +910,18 @@ async function processImageElement(imgEl){
   sparkle(imgEl.getBoundingClientRect());
 
   chrome.runtime.sendMessage({ type: 'BADGE_UP' }).catch(()=>{});
-  if (settings.aiMode) {
-    const label = model ? `AI ${model}` : 'AI enhanced';
-    makeToast(label);
-  } else {
-    makeToast(`Enhanced ${settings.scale}× • sharpen ${Number(settings.sharpenStrength).toFixed(2)}`);
-  }
-}
+  const label = model ? ('AI ' + model) : 'AI enhanced';
+  makeToast(label);}
 
 async function processOnce(preload, showStatus){
   if (!settings.enabled) return;
   if (!hostAllowed()) return;
+  if (!settings.aiMode) {
+    if (showStatus) makeToast('AI enhance is off');
+    return;
+  }
 
-  if (settings.aiMode && Date.now() < aiHostDownUntil) {
+  if (Date.now() < aiHostDownUntil) {
     scheduleAfterCooldown(preload);
     if (Date.now() > cooldownNotifiedUntil) {
       cooldownNotifiedUntil = aiHostDownUntil || (Date.now() + 20000);
@@ -1105,14 +934,14 @@ async function processOnce(preload, showStatus){
   busy = true;
   try{
     if (showStatus){
-      makeToast(preload ? 'Enhancing + preload...' : 'Enhancing...');
+      makeToast(preload ? 'AI enhancing + preload...' : 'AI enhancing...');
     }
     const img = findBestVisibleImage();
     if (!img) { makeToast('No panel found'); return; }
 
     // Burst cooldown is only for auto mode; manual Enhance/Preload should do what the user asked.
     const manual = !!showStatus;
-    const shouldBurstLimit = settings.aiMode && settings.autoPanel && !manual;
+    const shouldBurstLimit = settings.autoPanel && !manual;
     await processImageElement(img);
     if (shouldBurstLimit && bumpAiBurstAndMaybeCooldown(preload)) return;
 
@@ -1120,16 +949,12 @@ async function processOnce(preload, showStatus){
       const next = getNextCandidateImages(img, clamp(Number(settings.preUpscaleCount||0), 0, 4));
       for (const ni of next){
         try{
-          if (settings.aiMode) {
-            // AI preload: warm the host disk cache without touching page DOM (prevents flicker + CSP issues).
-            await preloadAiForImage(ni);
-          } else {
-            await processImageElement(ni);
-          }
+          // AI preload: warm the host disk cache without touching page DOM (prevents flicker + CSP issues).
+          await preloadAiForImage(ni);
           if (shouldBurstLimit && bumpAiBurstAndMaybeCooldown(preload)) return;
         }catch(e){
           const msg = String(e?.message || e || '');
-          if (settings.aiMode && msg.includes('AI host cooldown')) {
+          if (msg.includes('AI host cooldown')) {
             scheduleAfterCooldown(preload);
             if (Date.now() > cooldownNotifiedUntil) {
               cooldownNotifiedUntil = aiHostDownUntil || (Date.now() + 20000);
@@ -1144,7 +969,7 @@ async function processOnce(preload, showStatus){
   } catch(e){
     log('Enhance failed:', e);
     const msg = String(e?.message || e || '').slice(0, 120);
-    if (settings.aiMode && msg.includes('AI host cooldown')) {
+    if (msg.includes('AI host cooldown')) {
       scheduleAfterCooldown(preload);
       if (Date.now() > cooldownNotifiedUntil) {
         cooldownNotifiedUntil = aiHostDownUntil || (Date.now() + 20000);
@@ -1152,11 +977,7 @@ async function processOnce(preload, showStatus){
       }
       return;
     }
-    if (settings.aiMode && msg) {
-      makeToast(`AI failed: ${msg}`);
-    } else {
-      makeToast('Upscale failed');
-    }
+    if (msg) makeToast(`AI failed: ${msg}`);
   } finally {
     busy = false;
   }
@@ -1240,6 +1061,7 @@ chrome.runtime.onMessage.addListener((msg) => {
     loadSettings().then(()=>{
       if (!settings.enabled || !hostAllowed() || !settings.aiMode) {
         maybeStopHost('settings_update');
+        restoreAllUpscaledImages();
       } else {
         maybeStartHost('settings_update');
       }

@@ -96,6 +96,11 @@ DEFAULT_CFG = {
     }
   },
   "illustration_by_quality": {
+    "2": {
+      "fast": "2x_IllustrationJaNai_V1_ESRGAN_120k.pth",
+      "balanced": "2x_IllustrationJaNai_V1_ESRGAN_120k.pth",
+      "best": "2x_IllustrationJaNai_V1_ESRGAN_120k.pth"
+    },
     "4": {
       "fast": "4x_IllustrationJaNai_V1_ESRGAN_135k.pth",
       "balanced": "4x_IllustrationJaNai_V1_ESRGAN_135k.pth",
@@ -371,18 +376,30 @@ def _has_manga_scale(scale: int) -> bool:
   except Exception:
     return False
 
+def _has_illustration_scale(scale: int) -> bool:
+  try:
+    mp_q = CFG.get("illustration_by_quality", {}).get(str(scale), {})
+    if any(bool(v) for v in (mp_q or {}).values()):
+      return True
+    mp = CFG.get("model_map_by_type", {}).get("illustration", {}).get(str(scale), {})
+    return any(bool(v) for v in (mp or {}).values())
+  except Exception:
+    return False
+
 def _model_scale_for_outscale(outscale: int, model_type: str, quality: str) -> int:
   # Prefer a native-scale model when possible. For 3x, use 2x Manga models + resize to 3x
   # for a large speedup vs running 4x and downscaling.
   if outscale == 2:
     if model_type == "manga" and _has_manga_scale(2):
       return 2
-    # Illustration currently ships 4x models only.
+    if model_type == "illustration" and _has_illustration_scale(2):
+      return 2
     return 4
   if outscale == 3:
     if model_type == "manga" and _has_manga_scale(2):
       return 2
-    # Illustration currently ships 4x models only.
+    if model_type == "illustration" and _has_illustration_scale(2):
+      return 2
     return 4
   return 4
 
@@ -759,6 +776,30 @@ def _download_models(allow_dat2: bool) -> dict:
     except OSError:
       pass
     imported.append(name)
+
+  # Optional: 2x IllustrationJaNai V1 ESRGAN model (not included in the upstream "ModelsOnly" zips).
+  extra_model = "2x_IllustrationJaNai_V1_ESRGAN_120k.pth"
+  extra_path = os.path.join(MODELS_DIR, extra_model)
+  if not os.path.exists(extra_path):
+    extra_url = os.environ.get("MU_ILLU_2X_URL") or f"https://github.com/softlynn/mangaupscaler/releases/download/v0.2.1-alpha/{extra_model}"
+    try:
+      _log(f"Downloading extra model {extra_model}")
+      with requests.get(extra_url, stream=True, timeout=240) as resp:
+        resp.raise_for_status()
+        tmp = extra_path + ".tmp"
+        with open(tmp, "wb") as f:
+          for chunk in resp.iter_content(chunk_size=1024 * 1024):
+            if chunk:
+              f.write(chunk)
+        os.replace(tmp, extra_path)
+      imported.append(extra_model)
+    except Exception as e:
+      _log(f"Extra model download skipped: {e}")
+      try:
+        if os.path.exists(extra_path + '.tmp'):
+          os.remove(extra_path + '.tmp')
+      except OSError:
+        pass
 
   if not allow_dat2:
     for root, _, files in os.walk(MODELS_DIR):

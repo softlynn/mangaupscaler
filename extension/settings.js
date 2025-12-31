@@ -4,11 +4,8 @@ const DEFAULTS = {
   autoPanel: true,
   scale: 3,
   preUpscaleCount: 1,
-  sharpenStrength: 0.40,
-  denoiseStrength: 0.15,
   whitelist: {},
   showToast: true,
-  watermark: true,
   aiMode: true,
   aiQuality: 'balanced',
   allowDat2: false,
@@ -120,8 +117,6 @@ async function readUIIntoSettings(){
   s.aiQuality = String($('aiQuality')?.value || s.aiQuality || 'balanced');
   s.scale = Number($('scale').value) || 3;
   s.preUpscaleCount = Number($('preUpscaleCount').value) || 0;
-  s.sharpenStrength = Number($('sharpenStrength').value) || 0;
-  s.denoiseStrength = Number($('denoiseStrength').value) || 0;
   s.cacheMaxGb = Number($('cacheMaxGb').value) || 0;
   s.cacheMaxAgeDays = Number($('cacheMaxAgeDays').value) || 0;
   s.idleShutdownMinutes = Number($('idleShutdownMinutes').value) || 0;
@@ -138,17 +133,11 @@ async function readUIIntoSettings(){
 function bindRanges(){
   const pre = $('preUpscaleCount');
   const preVal = $('preVal');
-  const sh = $('sharpenStrength');
-  const shVal = $('sharpenVal');
-  const dn = $('denoiseStrength');
-  const dnVal = $('denoiseVal');
 
   const upd = ()=>{
     preVal.textContent = `${pre.value} page(s)`;
-    shVal.textContent = Number(sh.value).toFixed(2);
-    dnVal.textContent = Number(dn.value).toFixed(2);
   };
-  [pre,sh,dn].forEach(x=>x.addEventListener('input', upd));
+  [pre].forEach(x=>x.addEventListener('input', upd));
   upd();
 }
 
@@ -192,8 +181,6 @@ async function init(){
   $('scale').value = String(s.scale||3);
 
   $('preUpscaleCount').value = String(s.preUpscaleCount||0);
-  $('sharpenStrength').value = String(s.sharpenStrength||0);
-  $('denoiseStrength').value = String(s.denoiseStrength||0);
   $('cacheMaxGb').value = String(s.cacheMaxGb ?? 1.0);
   $('cacheMaxAgeDays').value = String(s.cacheMaxAgeDays ?? 0);
   $('idleShutdownMinutes').value = String(s.idleShutdownMinutes ?? 5);

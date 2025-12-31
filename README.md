@@ -16,8 +16,8 @@ It detects the manga panel in view and swaps it with an AI-upscaled version from
 - 🖥️ Tray app with logs + cache tools (green dot while enhancing)
 
 ## ⬇️ Downloads (Windows)
-- 🖥️ Host installer: [MangaUpscalerHostSetup.exe](https://github.com/softlynn/mangaupscaler/releases/download/v0.2.0-alpha/MangaUpscalerHostSetup.exe)
-- 🧩 Chrome extension: [MangaUpscalerExtension.zip](https://github.com/softlynn/mangaupscaler/releases/download/v0.2.0-alpha/MangaUpscalerExtension.zip)
+- 🖥️ Host installer: [MangaUpscalerHostSetup.exe](https://github.com/softlynn/mangaupscaler/releases/download/v0.2.1-alpha/MangaUpscalerHostSetup.exe)
+- 🧩 Chrome extension: [MangaUpscalerExtension.zip](https://github.com/softlynn/mangaupscaler/releases/download/v0.2.1-alpha/MangaUpscalerExtension.zip)
 
 ## 🧰 Install (Windows, recommended)
 ### 1) Add the extension (unpacked) 🧩
@@ -42,11 +42,13 @@ It detects the manga panel in view and swaps it with an AI-upscaled version from
    - 🤖 **AI Mode** (recommended): uses the local AI host.
    - 🔍 **Scale**: AI output scale (2× / 3× / 4×).
    - ⚡ **AI Quality**: fast / balanced / best.
-3. Click **Enhance** (or enable auto panel mode).
+3. Click **Enhance panel** (or enable auto panel mode).
+   - **Enhance + Preload** warms the next pages in the host cache (so scrolling feels faster).
 
 ## 🧩 Local host notes
 - 📦 Models are installed to: `%APPDATA%\\MangaUpscalerHost\\models`
 - 🎨 Recommended IllustrationJaNai (color):
+  - ✅ `2x_IllustrationJaNai_V1_ESRGAN_120k.pth` (fast/balanced/best at 2x)
   - ✅ `4x_IllustrationJaNai_V1_ESRGAN_135k.pth` (fast/balanced)
   - 🐢 `4x_IllustrationJaNai_V1_DAT2_190k.pth` (best)
 - 🖤 MangaJaNai (grayscale):
@@ -60,4 +62,3 @@ It detects the manga panel in view and swaps it with an AI-upscaled version from
 ## ℹ️ Notes
 - The host endpoint is `http://127.0.0.1:48159/enhance`.
 - The venv, models, and cache are intentionally ignored by Git.
-
