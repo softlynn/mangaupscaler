@@ -536,7 +536,9 @@ async function decodeBlobToBitmap(blob){
     if (typeof ImageDecoder !== 'undefined') {
       const sniff = await sniffMimeFromBlob(blob);
       const type = (blob.type && blob.type !== 'application/octet-stream') ? blob.type : (sniff || 'image/webp');
-      const dec = new ImageDecoder({ data: blob, type });
+      // ImageDecoder expects ReadableStream/ArrayBuffer/ArrayBufferView, not a Blob.
+      const data = await blob.arrayBuffer();
+      const dec = new ImageDecoder({ data, type });
       const frame = await dec.decode({ frameIndex: 0 });
       try { await dec.close(); } catch {}
       return frame.image;
