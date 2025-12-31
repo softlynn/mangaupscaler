@@ -60,6 +60,7 @@ let lastScrollAt = 0;
 let warmTimer = null;
 let warmInFlight = false;
 let preSwapBusy = false;
+let warmHostCacheUntil = new Map(); // key -> untilMs (key is getPreloadKeyForUrl(url))
 
 const ENHANCED_PRELOAD_TTL_MS = 2 * 60 * 1000;
 const ENHANCED_PRELOAD_MAX_ENTRIES = 6;
@@ -846,6 +847,23 @@ function getPreloadKeyForUrl(url){
   return `${url}::s=${scale}::q=${quality}::f=${format}`;
 }
 
+function markHostCacheWarmForUrl(url, ttlMs){
+  try{
+    if (!url || !isHttpUrl(url)) return;
+    const key = getPreloadKeyForUrl(url);
+    const until = Date.now() + (Number(ttlMs || 0) || 90_000);
+    warmHostCacheUntil.set(key, until);
+    // Bound growth (keys only).
+    if (warmHostCacheUntil.size > 600) {
+      const now = Date.now();
+      for (const [k, u] of warmHostCacheUntil) {
+        if (u < now) warmHostCacheUntil.delete(k);
+        if (warmHostCacheUntil.size <= 420) break;
+      }
+    }
+  } catch {}
+}
+
 function _evictEnhancedPreloadIfNeeded(){
   const now = Date.now();
   for (const [k, v] of enhancedPreloadCache) {
@@ -1074,6 +1092,7 @@ async function preloadAiForImage(imgEl){
 
   imgEl.dataset.muPreloadKey = key;
   imgEl.dataset.muPreloadUntil = String(Date.now() + 90_000);
+  markHostCacheWarmForUrl(src, 90_000);
 
   // Preload the actual page image too (so scrolling doesn't show blank placeholders).
   prefetchUrl(src);
@@ -1163,6 +1182,8 @@ function isHostCacheWarm(imgEl){
     const src = getBestImageUrl(imgEl);
     if (!src || !isHttpUrl(src)) return false;
     const key = getPreloadKeyForUrl(src);
+    const warmUntil = Number(warmHostCacheUntil.get(key) || 0);
+    if (warmUntil && Date.now() < warmUntil) return true;
     const ok = (String(imgEl.dataset?.muPreloadKey || '') === key) && (Number(imgEl.dataset?.muPreloadUntil || 0) > Date.now());
     return ok;
   } catch {
@@ -1343,9 +1364,19 @@ async function processOnce(preload, showStatus){
     // Burst cooldown is only for auto mode; manual Enhance/Preload should do what the user asked.
     const manual = !!showStatus;
     const shouldBurstLimit = settings.autoPanel && !manual;
-    // On WeebCentral, only the "next" panel tends to exist in the DOM at any time.
-    // Start pre-upscaling it immediately so scrolling to it feels instant.
     await processImageElement(img);
+    // Always warm the next panel after enhancing the current one.
+    // Even if the slider is 0, the next panel should be ready as soon as it appears.
+    try{
+      const nextOne = getNextCandidateImages(img, 1)[0];
+      if (nextOne) {
+        await preloadAiForImage(nextOne);
+        // Try to swap immediately if the element is already in the DOM.
+        // Force on WeebCentral (it usually only keeps the next panel in DOM).
+        const force = isWeebCentral();
+        await preSwapFromHostIfWarm(nextOne, { force });
+      }
+    } catch {}
     if (shouldBurstLimit && bumpAiBurstAndMaybeCooldown(true, preload)) return;
 
     if (preload){

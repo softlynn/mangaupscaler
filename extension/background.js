@@ -43,6 +43,8 @@ const NATIVE_HOST = 'com.softlynn.manga_upscaler';
 let hostOkUntil = 0;
 const AI_STREAM_CHUNK_SIZE = 256 * 1024; // 256KB
 const aiStreamStore = new Map(); // id -> { chunks: ArrayBuffer[], byteLength, contentType, model, hostError, elapsedMs, createdAt }
+let tabScanTimer = null;
+let lastTrayState = null; // 'running' | 'stopped' | null
 
 function newStreamId(){
   try{
@@ -101,6 +103,15 @@ chrome.runtime.onStartup.addListener(() => {
   maybeAutoStartTray('startup').catch(()=>{});
 });
 
+chrome.tabs.onUpdated.addListener(() => scheduleTrayReconcile('tabs_updated'));
+chrome.tabs.onRemoved.addListener(() => scheduleTrayReconcile('tabs_removed'));
+chrome.tabs.onActivated.addListener(() => scheduleTrayReconcile('tabs_activated'));
+chrome.windows.onRemoved.addListener(() => scheduleTrayReconcile('window_removed'));
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'sync') return;
+  if (changes.enabled || changes.whitelist) scheduleTrayReconcile('settings_changed');
+});
+
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId !== 'mu-enhance-image') return;
   const url = info.srcUrl || '';
@@ -151,13 +162,64 @@ async function stopTray(){
   }
 }
 
+function hostAllowed(host, whitelist){
+  if (!host) return false;
+  const wh = whitelist || {};
+  const any = Object.keys(wh).length > 0;
+  if (!any) return (host === 'comix.to' || host === 'weebcentral.com' || host.endsWith('.weebcentral.com'));
+  return !!wh[host];
+}
+
+async function countMangaTabs(){
+  try{
+    const s = await chrome.storage.sync.get({ enabled: true, whitelist: {} });
+    if (!s?.enabled) return 0;
+    const tabs = await chrome.tabs.query({});
+    let count = 0;
+    for (const t of tabs){
+      const url = String(t?.url || '');
+      if (!url.startsWith('http://') && !url.startsWith('https://')) continue;
+      let host = '';
+      try { host = new URL(url).hostname; } catch { host = ''; }
+      if (hostAllowed(host, s.whitelist || {})) count++;
+    }
+    return count;
+  } catch {
+    return 0;
+  }
+}
+
+async function reconcileTray(reason){
+  const n = await countMangaTabs();
+  if (n <= 0) {
+    if (lastTrayState !== 'stopped') {
+      await stopNativeHost(reason || 'no_manga_tabs');
+      await stopTray();
+      lastTrayState = 'stopped';
+    }
+    return;
+  }
+  if (lastTrayState !== 'running') {
+    await startTray();
+    await ensureHostRunning(reason || 'manga_tabs');
+    lastTrayState = 'running';
+  } else {
+    await ensureHostRunning(reason || 'manga_tabs');
+  }
+}
+
+function scheduleTrayReconcile(reason){
+  try{
+    if (tabScanTimer) clearTimeout(tabScanTimer);
+    tabScanTimer = setTimeout(() => reconcileTray(reason).catch(()=>{}), 500);
+  } catch {}
+}
+
 async function maybeAutoStartTray(reason){
   try{
     const s = await chrome.storage.sync.get({ enabled: true });
     if (!s?.enabled) return false;
-    await startTray();
-    // best-effort: ensure server is up (tray may already be running)
-    await ensureHostRunning(reason || 'auto');
+    scheduleTrayReconcile(reason || 'auto');
     return true;
   } catch {
     return false;
