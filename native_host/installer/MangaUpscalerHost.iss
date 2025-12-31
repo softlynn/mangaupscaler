@@ -1,5 +1,5 @@
 #define MyAppName "Manga Upscaler Host"
-#define MyAppVersion "1.4.0"
+#define MyAppVersion "0.2.1"
 #define MyAppPublisher "Softlynn"
 #define MyTrayExe "MangaUpscalerHost.exe"
 #define MyNativeExe "MangaUpscalerNativeHost.exe"
@@ -210,7 +210,7 @@ begin
     Manifest :=
       '{' + #13#10 +
       '  "name": "com.softlynn.manga_upscaler",' + #13#10 +
-      '  "description": "Softlynn Manga Upscaler native host (optional AI mode)",' + #13#10 +
+      '  "description": "Softlynn Manga Upscaler native host (local AI host)",' + #13#10 +
       '  "path": "' + HostPath + '",' + #13#10 +
       '  "type": "stdio",' + #13#10 +
       '  "allowed_origins": ["chrome-extension://' + ExtensionId + '/"]' + #13#10 +
