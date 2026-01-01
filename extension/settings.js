@@ -239,6 +239,27 @@ async function init(){
     } catch {}
   });
 
+  $('telemetryTest').addEventListener('click', async ()=>{
+    const btn = $('telemetryTest');
+    const out = $('telemetryTestStatus');
+    if (btn) btn.textContent = 'Testing...';
+    if (out) out.textContent = '';
+    try{
+      const resp = await chrome.runtime.sendMessage({ type:'TELEMETRY_TEST' }).catch(()=>null);
+      if (!out) return;
+      if (!resp) { out.textContent = 'No response (background not available).'; return; }
+      if (resp.dropped) { out.textContent = 'Diagnostics are disabled. Turn on “Share anonymous diagnostics”, click Save, then retry.'; return; }
+      const parts = [];
+      parts.push(`Local host: ${resp.hostOk ? 'OK' : 'not running'}`);
+      parts.push(`Local /telemetry/recent: ${resp.telemetryRecentOk ? 'OK' : 'not found'}`);
+      if (resp.uploadUrl) parts.push(`Upload: ${resp.remoteOk ? 'OK' : 'failed'}`);
+      else parts.push('Upload: (blank)');
+      out.textContent = parts.join(' • ');
+    } finally {
+      if (btn) btn.textContent = 'Run test';
+    }
+  });
+
   $('clearCache').addEventListener('click', async ()=>{
     const btn = $('clearCache');
     btn.textContent = 'Clearing...';

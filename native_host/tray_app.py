@@ -7,7 +7,9 @@ import sys
 import threading
 import time
 import urllib.request
+import urllib.error
 import ctypes
+from datetime import datetime
 
 import pystray
 from PIL import Image, ImageDraw
@@ -68,6 +70,9 @@ CACHE_DIR = os.path.join(ROOT, "cache")
 CONFIG_PATH = os.path.join(ROOT, "config.json")
 LOG_PATH = os.path.join(ROOT, "host.log")
 PID_PATH = os.path.join(ROOT, "tray.pid")
+UPDATE_API_URL = "https://api.github.com/repos/softlynn/mangaupscaler/releases/tags/alpha"
+INSTALLER_ASSET_NAME = "MangaUpscalerHostSetup.exe"
+INSTALLER_FALLBACK_URL = f"https://github.com/softlynn/mangaupscaler/releases/download/alpha/{INSTALLER_ASSET_NAME}"
 
 
 def _find_pythonw() -> str:
@@ -230,6 +235,132 @@ def _load_config_allow_dat2() -> bool:
   except Exception:
     return False
 
+def _load_config() -> dict:
+  try:
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+      return json.load(f) or {}
+  except Exception:
+    return {}
+
+def _save_config(cfg: dict) -> bool:
+  try:
+    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+  except Exception:
+    pass
+  try:
+    tmp = CONFIG_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+      json.dump(cfg or {}, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, CONFIG_PATH)
+    return True
+  except Exception:
+    return False
+
+def _parse_iso(s: str) -> datetime | None:
+  try:
+    s = (s or "").strip()
+    if not s:
+      return None
+    if s.endswith("Z"):
+      s = s[:-1] + "+00:00"
+    return datetime.fromisoformat(s)
+  except Exception:
+    return None
+
+def _fetch_latest_installer_info() -> tuple[str, str] | None:
+  try:
+    req = urllib.request.Request(
+      UPDATE_API_URL,
+      headers={
+        "User-Agent": "MangaUpscalerHost",
+        "Accept": "application/vnd.github+json"
+      }
+    )
+    with urllib.request.urlopen(req, timeout=8) as resp:
+      if resp.status != 200:
+        return None
+      data = json.loads(resp.read().decode("utf-8", "ignore") or "{}")
+    assets = data.get("assets") or []
+    for a in assets:
+      if str(a.get("name") or "") == INSTALLER_ASSET_NAME:
+        return (str(a.get("updated_at") or ""), str(a.get("browser_download_url") or ""))
+    # Fallback: if asset not found, use release updated_at + direct download URL.
+    return (str(data.get("published_at") or data.get("created_at") or data.get("updated_at") or ""), INSTALLER_FALLBACK_URL)
+  except Exception:
+    return None
+
+def _open_url(url: str):
+  try:
+    if url:
+      os.startfile(url)
+  except Exception:
+    pass
+
+def _download_to_temp(url: str) -> str | None:
+  try:
+    import tempfile
+    dest = os.path.join(tempfile.gettempdir(), f"{INSTALLER_ASSET_NAME}")
+    req = urllib.request.Request(url, headers={"User-Agent": "MangaUpscalerHost"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+      if resp.status != 200:
+        return None
+      with open(dest, "wb") as f:
+        while True:
+          chunk = resp.read(1024 * 256)
+          if not chunk:
+            break
+          f.write(chunk)
+    return dest
+  except Exception:
+    return None
+
+def _check_update_available(cfg: dict) -> tuple[bool, str, str]:
+  info = _fetch_latest_installer_info()
+  if not info:
+    return (False, "", "")
+  remote_updated_at, url = info
+  local_seen = str((cfg or {}).get("last_seen_installer_updated_at") or "")
+  rt = _parse_iso(remote_updated_at)
+  lt = _parse_iso(local_seen)
+  if rt and (not lt or rt > lt):
+    return (True, remote_updated_at, url)
+  return (False, remote_updated_at, url)
+
+def _toggle_auto_update(cfg: dict) -> bool:
+  cur = bool((cfg or {}).get("auto_update_host", True))
+  cfg["auto_update_host"] = (not cur)
+  return _save_config(cfg)
+
+def _run_update_flow(cfg: dict, ctl: HostController, icon: pystray.Icon | None, url: str, remote_updated_at: str):
+  cfg["last_seen_installer_updated_at"] = remote_updated_at or cfg.get("last_seen_installer_updated_at", "")
+  _save_config(cfg)
+
+  # Stop host before launching installer so files can be replaced.
+  try:
+    ctl.stop()
+  except Exception:
+    pass
+
+  path = _download_to_temp(url) if url else None
+  if path:
+    try:
+      subprocess.Popen([path], cwd=os.path.dirname(path))
+    except Exception:
+      _open_url(url)
+  else:
+    _open_url(url or "https://github.com/softlynn/mangaupscaler/releases/tag/alpha")
+
+  # Exit tray to avoid locking files during update.
+  try:
+    _remove_pid()
+  except Exception:
+    pass
+  try:
+    if icon:
+      icon.stop()
+  except Exception:
+    pass
+
 def _write_pid():
   try:
     with open(PID_PATH, "w", encoding="utf-8") as f:
@@ -323,6 +454,35 @@ def _status_loop(icon, ctl: HostController, idle_icon: Image.Image, busy_icon: I
     time.sleep(0.7 if running else 1.4)
 
 
+def _update_loop(icon: pystray.Icon, ctl: HostController):
+  # Periodically check for updates and launch the latest installer if enabled.
+  while True:
+    try:
+      cfg = _load_config()
+      if bool(cfg.get("auto_update_host", True)):
+        ok, remote_updated_at, url = _check_update_available(cfg)
+        if ok:
+          _run_update_flow(cfg, ctl, icon, url, remote_updated_at)
+          return
+    except Exception:
+      pass
+    time.sleep(6 * 60 * 60)  # 6h
+
+
+def _on_check_updates(icon, item, ctl: HostController):
+  cfg = _load_config()
+  ok, remote_updated_at, url = _check_update_available(cfg)
+  if ok:
+    _run_update_flow(cfg, ctl, icon, url, remote_updated_at)
+  else:
+    _open_url("https://github.com/softlynn/mangaupscaler/releases/tag/alpha")
+
+
+def _on_toggle_auto_update(icon, item):
+  cfg = _load_config()
+  _toggle_auto_update(cfg)
+
+
 def main():
   _ensure_single_instance_or_exit()
   _write_pid()
@@ -332,6 +492,9 @@ def main():
   menu = pystray.Menu(
     pystray.MenuItem("Start host", lambda icon, item: _on_start(icon, item, ctl), enabled=lambda item: not ctl.is_running()),
     pystray.MenuItem("Stop host", lambda icon, item: _on_stop(icon, item, ctl), enabled=lambda item: ctl.is_running()),
+    pystray.Menu.SEPARATOR,
+    pystray.MenuItem("Check for host updates", lambda icon, item: _on_check_updates(icon, item, ctl)),
+    pystray.MenuItem("Auto-update host", _on_toggle_auto_update, checked=lambda item: bool(_load_config().get("auto_update_host", True))),
     pystray.Menu.SEPARATOR,
     pystray.MenuItem("Open cache folder", _on_open_cache),
     pystray.MenuItem("Open models folder", _on_open_models),
@@ -348,6 +511,7 @@ def main():
   busy_icon = _make_busy_icon(idle_icon)
   icon = pystray.Icon("MangaUpscalerHost", idle_icon, "Manga Upscaler Host", menu)
   threading.Thread(target=_status_loop, args=(icon, ctl, idle_icon, busy_icon), daemon=True).start()
+  threading.Thread(target=_update_loop, args=(icon, ctl), daemon=True).start()
   icon.run()
 
 

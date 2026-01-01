@@ -21,9 +21,12 @@ const runPrimary = $('runPrimary');
 
 const siteLink = $('siteLink');
 const supportLink = $('supportLink');
+const githubLink = $('githubLink');
+const installHostLink = $('installHostLink');
 const openSettings = $('openSettings');
 const aiQuality = $('aiQuality');
 const siteStatus = $('siteStatus');
+const hostStatus = $('hostStatus');
 const preStatus = $('preStatus');
 
 let currentHost = null;
@@ -103,6 +106,7 @@ async function load(){
   applySiteLock(allowed);
   applyEnabledState(!!s.enabled);
   refreshPreStatus().catch(()=>{});
+  refreshHostStatus().catch(()=>{});
   try{
     if (preStatusTimer) clearInterval(preStatusTimer);
     preStatusTimer = setInterval(() => refreshPreStatus().catch(()=>{}), 900);
@@ -110,6 +114,7 @@ async function load(){
   } catch {}
 
   siteLink.addEventListener('click', (e)=>{ e.preventDefault(); chrome.tabs.create({url:'https://softlynn.carrd.co/#'}); });
+  if (githubLink) githubLink.addEventListener('click', (e)=>{ e.preventDefault(); chrome.tabs.create({url:'https://github.com/softlynn/mangaupscaler'}); });
   openSettings.addEventListener('click', ()=>{
   chrome.runtime.openOptionsPage();
 });
@@ -146,6 +151,30 @@ async function refreshPreStatus(){
     preStatus.textContent = `Ahead: enhanced ${e}/${denom} • cached ${c}/${denom} • page prefetched ${f}/${denom}`;
   } catch {
     if (preStatus) preStatus.textContent = '';
+  }
+}
+
+async function refreshHostStatus(){
+  try{
+    const resp = await chrome.runtime.sendMessage({ type:'HOST_STATUS' }).catch(()=>null);
+    if (!hostStatus) return;
+    if (!resp || !resp.ok) { hostStatus.textContent = ''; return; }
+    if (resp.hostOk) {
+      hostStatus.textContent = resp.telemetryRecentOk ? 'Host: connected • Diagnostics: available' : 'Host: connected';
+      if (installHostLink) installHostLink.style.display = 'none';
+    } else {
+      hostStatus.textContent = 'Host not detected. Install the host to enable AI enhance.';
+      if (installHostLink) installHostLink.style.display = 'inline-flex';
+      if (installHostLink && !installHostLink._bound) {
+        installHostLink._bound = true;
+        installHostLink.addEventListener('click', (e)=>{
+          e.preventDefault();
+          chrome.tabs.create({ url: 'https://github.com/softlynn/mangaupscaler/releases/tag/alpha' });
+        });
+      }
+    }
+  } catch {
+    if (hostStatus) hostStatus.textContent = '';
   }
 }
 

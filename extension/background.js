@@ -27,6 +27,17 @@ chrome.runtime.onInstalled.addListener(async ()=>{
   if (Object.keys(wl).length === 0){
     await chrome.storage.sync.set({ whitelist: defaults });
   }
+
+  // Seed telemetry defaults only if user hasn't set them yet.
+  try{
+    const all = await chrome.storage.sync.get(null);
+    const patch = {};
+    if (!Object.prototype.hasOwnProperty.call(all, 'telemetryEnabled')) patch.telemetryEnabled = TELEMETRY_DEFAULT_ENABLED;
+    if (!Object.prototype.hasOwnProperty.call(all, 'telemetryUploadUrl')) patch.telemetryUploadUrl = TELEMETRY_DEFAULT_UPLOAD_URL;
+    if (Object.keys(patch).length) await chrome.storage.sync.set(patch);
+  } catch {
+    // ignore
+  }
 });
 
 chrome.runtime.onSuspend.addListener(() => {
@@ -39,6 +50,8 @@ chrome.runtime.onSuspend.addListener(() => {
 const AI_HOST = 'http://127.0.0.1:48159';
 const BADGE_BG = '#ff7fc8';
 const NATIVE_HOST = 'com.softlynn.manga_upscaler';
+const TELEMETRY_DEFAULT_ENABLED = true;
+const TELEMETRY_DEFAULT_UPLOAD_URL = 'https://script.google.com/macros/s/AKfycbzva5kasl0U0QgZc8tAFzcbERqdL98S8rjRdjY8by4C8yINApPSRH3qZaU3OReknQz7/exec';
 
 let hostOkUntil = 0;
 const AI_STREAM_CHUNK_SIZE = 256 * 1024; // 256KB
@@ -58,14 +71,14 @@ function newStreamId(){
 async function loadTelemetryCfg(){
   if (telemetryCfg) return telemetryCfg;
   try{
-    const s = await chrome.storage.sync.get({ telemetryEnabled: false, telemetryUploadUrl: '' });
+    const s = await chrome.storage.sync.get({ telemetryEnabled: TELEMETRY_DEFAULT_ENABLED, telemetryUploadUrl: TELEMETRY_DEFAULT_UPLOAD_URL });
     telemetryCfg = {
       enabled: !!s.telemetryEnabled,
       uploadUrl: String(s.telemetryUploadUrl || '').trim()
     };
     return telemetryCfg;
   } catch {
-    telemetryCfg = { enabled: false, uploadUrl: '' };
+    telemetryCfg = { enabled: TELEMETRY_DEFAULT_ENABLED, uploadUrl: TELEMETRY_DEFAULT_UPLOAD_URL };
     return telemetryCfg;
   }
 }
@@ -302,6 +315,71 @@ function isCommError(err){
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     try {
+      if (msg?.type === 'HOST_STATUS') {
+        const hostOk = await pingHost(true);
+        let telemetryRecentOk = false;
+        if (hostOk) {
+          try{
+            const r = await fetch(`${AI_HOST}/telemetry/recent`, { cache: 'no-store' });
+            telemetryRecentOk = r.ok;
+          } catch {}
+        }
+        sendResponse({ ok: true, hostOk, telemetryRecentOk });
+        return;
+      }
+
+      if (msg?.type === 'TELEMETRY_TEST') {
+        const cfg = await loadTelemetryCfg();
+        if (!cfg.enabled) { sendResponse({ ok: true, dropped: true }); return; }
+        const hostOk = await pingHost(true);
+        let telemetryRecentOk = false;
+        if (hostOk) {
+          try{
+            const r = await fetch(`${AI_HOST}/telemetry/recent`, { cache: 'no-store' });
+            telemetryRecentOk = r.ok;
+          } catch {}
+        }
+        // reuse the telemetry sending path
+        const payload = {
+          v: 1,
+          ts: new Date().toISOString(),
+          type: 'test',
+          clientId: await getTelemetryClientId(),
+          site: { host: '', pathSig: '', profile: '' },
+          ext: { version: '' },
+          settings: {},
+          data: { source: 'telemetry_test' }
+        };
+
+        let localOk = null;
+        let remoteOk = null;
+        if (hostOk) {
+          try{
+            const r = await fetch(`${AI_HOST}/telemetry`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload)
+            });
+            localOk = r.ok;
+          } catch { localOk = false; }
+        } else {
+          localOk = false;
+        }
+        if (cfg.uploadUrl && /^https?:\/\//i.test(cfg.uploadUrl)) {
+          try{
+            const r = await fetch(cfg.uploadUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              referrerPolicy: 'no-referrer',
+              body: JSON.stringify(payload)
+            });
+            remoteOk = r.ok;
+          } catch { remoteOk = false; }
+        }
+        sendResponse({ ok: true, hostOk, telemetryRecentOk, localOk, remoteOk, uploadUrl: cfg.uploadUrl || '' });
+        return;
+      }
+
       if (msg?.type === 'TELEMETRY_EVENT') {
         const cfg = await loadTelemetryCfg();
         if (!cfg.enabled) { sendResponse({ ok: true, dropped: true }); return; }
