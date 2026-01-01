@@ -51,5 +51,7 @@
   "cache_max_gb": 1.0,
   "cache_max_age_days": 0,
   "allow_dat2": false,
-  "idle_shutdown_minutes": 5
+  "idle_shutdown_minutes": 5,
+  "engine_cache_max": 2,
+  "prewarm_models": true
 }

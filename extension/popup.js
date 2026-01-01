@@ -143,11 +143,12 @@ async function refreshPreStatus(){
     if (!resp || typeof resp !== 'object') { preStatus.textContent = ''; return; }
     const t = Number(resp.target || 0);
     const c = Number(resp.cached || 0);
-    const r = Number(resp.pageReady || 0);
+    const l = Number(resp.pageLoaded || 0);
+    const p = Number(resp.pageRequested || 0);
     const a = Number(resp.available || 0);
     if (t <= 0) { preStatus.textContent = ''; return; }
     const denom = a > 0 ? a : t;
-    preStatus.textContent = `Ahead: AI cached ${c}/${denom} • Page ready ${r}/${denom}`;
+    preStatus.textContent = `Ahead: AI cached ${c}/${denom} • Page loaded ${l}/${denom} • Page requested ${p}/${denom}`;
   } catch {
     if (preStatus) preStatus.textContent = '';
   }

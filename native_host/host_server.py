@@ -287,10 +287,12 @@ def _read_recent_telemetry(max_lines: int = 200) -> list[dict]:
     return out
   return out
 
-# Lazy-loaded model (kept in memory)
-_engine = None
+# Lazy-loaded models (kept in memory)
 _engine_lock = threading.Lock()
-_engine_key = None
+_engine_cache: dict[str, object] = {}
+_engine_cache_order: list[str] = []
+_engine_loading: dict[str, threading.Event] = {}
+_prewarm_started = False
 _wrapped_cache: dict[str, str] = {}
 _model_blocks: dict[str, int] = {}
 _last_cache_cleanup = 0.0
@@ -864,8 +866,123 @@ def _choose_model_type(is_grayscale: bool) -> str:
   has_illu = any(bool(v) for v in illu.values()) or any(bool(v) for v in illu_q.values())
   return "illustration" if has_illu else "manga"
 
+def _engine_cache_max() -> int:
+  try:
+    n = int(CFG.get("engine_cache_max", 2))
+    return max(1, min(n, 4))
+  except Exception:
+    return 2
+
+def _evict_engines_if_needed():
+  max_n = _engine_cache_max()
+  while len(_engine_cache_order) > max_n:
+    old_key = _engine_cache_order.pop(0)
+    eng = _engine_cache.pop(old_key, None)
+    if eng is None:
+      continue
+    try:
+      # Best-effort: release references; CUDA memory is reclaimed when objects are freed.
+      del eng
+    except Exception:
+      pass
+  # Best-effort: free CUDA cache after evictions.
+  try:
+    import torch  # type: ignore
+    if torch.cuda.is_available():
+      torch.cuda.empty_cache()
+  except Exception:
+    pass
+
+def _get_engine(key: str, model_path: str, model_scale: int, quality: str):
+  while True:
+    evt = None
+    with _engine_lock:
+      eng = _engine_cache.get(key)
+      if eng is not None:
+        try:
+          if key in _engine_cache_order:
+            _engine_cache_order.remove(key)
+          _engine_cache_order.append(key)
+        except Exception:
+          pass
+        return eng
+      evt = _engine_loading.get(key)
+      if evt is None:
+        evt = threading.Event()
+        _engine_loading[key] = evt
+        break
+    # Someone else is loading this engine; wait, then retry.
+    try:
+      evt.wait(timeout=120)
+    except Exception:
+      time.sleep(0.2)
+
+  try:
+    eng = _load_engine(model_path, model_scale, quality)
+    with _engine_lock:
+      _engine_cache[key] = eng
+      try:
+        if key in _engine_cache_order:
+          _engine_cache_order.remove(key)
+        _engine_cache_order.append(key)
+      except Exception:
+        pass
+      _evict_engines_if_needed()
+    return eng
+  finally:
+    with _engine_lock:
+      e = _engine_loading.pop(key, None)
+      if e:
+        try:
+          e.set()
+        except Exception:
+          pass
+
+def _prewarm_engines():
+  # Preload the two most common model families (manga + illustration) so rapid color<->B/W
+  # switching while scrolling doesn't force a full model load on the critical path.
+  global _prewarm_started
+  with _engine_lock:
+    if _prewarm_started:
+      return
+    _prewarm_started = True
+  try:
+    if not bool(CFG.get("prewarm_models", True)):
+      return
+  except Exception:
+    pass
+
+  def run():
+    try:
+      q = _normalize_quality(CFG.get("default_quality", "balanced"))
+      outscale = _normalize_outscale(int(CFG.get("default_scale", 2)))
+      # Manga (use typical height bucket)
+      try:
+        model_type = "manga"
+        model_scale = _model_scale_for_outscale(outscale, model_type, q)
+        height_key = _pick_height(1600, model_scale, model_type)
+        model_path = _get_model_path(height_key, model_scale, model_type)
+        key = f"{model_path}::x{model_scale}::q={q}"
+        _get_engine(key, model_path, model_scale, q)
+      except Exception:
+        pass
+      # Illustration (prefer quality map)
+      try:
+        model_type = "illustration"
+        model_scale = _model_scale_for_outscale(outscale, model_type, q)
+        model_path = _get_illustration_model_path(model_scale, q)
+        if model_path:
+          key = f"{model_path}::x{model_scale}::q={q}"
+          _get_engine(key, model_path, model_scale, q)
+      except Exception:
+        pass
+    except Exception:
+      pass
+
+  threading.Thread(target=run, daemon=True).start()
+
 def enhance_bytes(img_bytes: bytes, outscale: int, quality: str | None, out_format: str | None = None) -> tuple[bytes, str, str]:
-  global _engine, _engine_key
+  _prewarm_engines()
   img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
   w, h = img.size
 
@@ -886,12 +1003,7 @@ def enhance_bytes(img_bytes: bytes, outscale: int, quality: str | None, out_form
     height_key = _pick_height(h, model_scale, model_type)
     model_path = _get_model_path(height_key, model_scale, model_type)
   key = f"{model_path}::x{model_scale}::q={q}"
-
-  with _engine_lock:
-    if _engine is None or _engine_key != key:
-      _engine = _load_engine(model_path, model_scale, q)
-      _engine_key = key
-    engine = _engine
+  engine = _get_engine(key, model_path, model_scale, q)
 
   import numpy as np
   in_img = np.array(img)[:, :, ::-1]  # RGB -> BGR

@@ -49,7 +49,7 @@ let io = null;
 let visibleScores = new Map(); // Map<img, intersectionArea>
 let lastHostStartAt = 0;
 let canvasOverlays = new WeakMap(); // WeakMap<img, { wrapper: HTMLElement, canvas: HTMLCanvasElement }>
-let preloadStatus = { target: 0, cached: 0, pageReady: 0, available: 0, updatedAt: 0, currentUrl: '' };
+let preloadStatus = { target: 0, cached: 0, pageLoaded: 0, pageRequested: 0, available: 0, updatedAt: 0, currentUrl: '' };
 let pagePrefetch = new Map(); // url -> untilMs
 let pagePrefetchInflight = new Map(); // url -> Image (keeps GC from canceling prefetch)
 let enhancedPreloadCache = new Map(); // key -> { blob, contentType, model, byteLength, createdAt, lastUsedAt }
@@ -59,6 +59,7 @@ let autoPendingPreload = false;
 let lastPreToastAt = 0;
 let lastPreToastMsg = '';
 let lastScrollAt = 0;
+let lastWeebTickAt = 0;
 let warmTimer = null;
 let warmInFlight = false;
 let preSwapBusy = false;
@@ -1258,19 +1259,23 @@ function computePreloadStatus(currentImg){
   const next = getNextCandidateImages(currentImg, target);
   const available = next.length;
   let cached = 0;
-  let pageReady = 0;
+  let pageLoaded = 0;
+  let pageRequested = 0;
   for (const ni of next){
     const url = getBestImageUrl(ni);
     if (!url || !isHttpUrl(url)) continue;
     const key = getPreloadKeyForUrl(url);
     const ok = (String(ni.dataset?.muPreloadKey || '') === key) && (Number(ni.dataset?.muPreloadUntil || 0) > Date.now());
     if (ok) cached++;
-    if (isPageImageReady(ni, url)) pageReady++;
+    if (ni?.complete && (ni?.naturalWidth || 0) > 0) pageLoaded++;
+    const until = Number(pagePrefetch.get(url) || 0);
+    if (until && Date.now() < until) pageRequested++;
   }
   preloadStatus = {
     target,
     cached,
-    pageReady,
+    pageLoaded,
+    pageRequested,
     available,
     updatedAt: Date.now(),
     currentUrl: String(getBestImageUrl(currentImg) || '')
@@ -1310,16 +1315,19 @@ function maybeToastPreloadProgress(currentImg){
   const available = next.length;
   if (available <= 0) return;
   let cached = 0;
-  let pageReady = 0;
+  let pageLoaded = 0;
+  let pageRequested = 0;
   for (const ni of next){
     const url = getBestImageUrl(ni);
     if (!url || !isHttpUrl(url)) continue;
     const key = getPreloadKeyForUrl(url);
     const ok = (String(ni.dataset?.muPreloadKey || '') === key) && (Number(ni.dataset?.muPreloadUntil || 0) > Date.now());
     if (ok) cached++;
-    if (isPageImageReady(ni, url)) pageReady++;
+    if (ni?.complete && (ni?.naturalWidth || 0) > 0) pageLoaded++;
+    const until = Number(pagePrefetch.get(url) || 0);
+    if (until && Date.now() < until) pageRequested++;
   }
-  const msg = `Ahead (${available}): AI cached ${cached}/${available} • Page ready ${pageReady}/${available}`;
+  const msg = `Ahead (${available}): AI cached ${cached}/${available} • Page loaded ${pageLoaded}/${available} • Page requested ${pageRequested}/${available}`;
   const now = Date.now();
   if (msg === lastPreToastMsg && (now - lastPreToastAt) < 2500) return;
   if ((now - lastPreToastAt) < 900) return;
@@ -1723,6 +1731,22 @@ function startAuto(){
         visibleScores.set(img, r.width * r.height);
       }
       schedule();
+
+      // WeebCentral often keeps only ~1-2 panels in the DOM. If the user scrolls fast, a new panel can
+      // appear and become the "best visible" between debounced scroll ticks. Nudge the enhancer more often.
+      try{
+        if (isWeebCentral() && settings.enabled && settings.autoPanel && hostAllowed()) {
+          const now = Date.now();
+          if (!busy && (now - lastWeebTickAt) > 90) {
+            lastWeebTickAt = now;
+            const shouldPreload = Number(settings.preUpscaleCount||0) > 0;
+            setTimeout(() => processOnce(shouldPreload, false).catch(()=>{}), 0);
+          } else if (busy) {
+            autoPending = true;
+            autoPendingPreload = Number(settings.preUpscaleCount||0) > 0;
+          }
+        }
+      } catch {}
     }, { threshold: [0, 0.15, 0.35, 0.65, 0.9] });
 
     for (const img of Array.from(document.images || [])){
