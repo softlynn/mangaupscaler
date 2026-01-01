@@ -23,3 +23,4 @@
 ### 🆙 Updates (alpha)
 - 🧩 Settings: add “Check for updates” to update both the local host + unpacked extension (alpha channel)
 - 🧰 Host: add a headless updater mode (download alpha assets, silent host installer launch, overwrite unpacked extension files)
+- 🧾 UX: show real update errors in Settings and stop tray “Check for host updates” from opening a browser when up to date

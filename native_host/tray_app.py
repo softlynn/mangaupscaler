@@ -601,7 +601,19 @@ def _on_check_updates(icon, item, ctl: HostController):
   if ok:
     _run_update_flow(cfg, ctl, icon, url, remote_updated_at)
   else:
-    _open_url("https://github.com/softlynn/mangaupscaler/releases/tag/alpha")
+    # Don't open a browser when up-to-date; just show a temporary tray tooltip.
+    try:
+      prev = icon.title
+      icon.title = "Manga Upscaler Host (up to date)"
+      def _restore():
+        try:
+          time.sleep(3.0)
+          icon.title = prev
+        except Exception:
+          pass
+      threading.Thread(target=_restore, daemon=True).start()
+    except Exception:
+      pass
 
 
 def _on_toggle_auto_update(icon, item):

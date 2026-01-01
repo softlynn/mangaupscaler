@@ -487,7 +487,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             setTimeout(() => { try { chrome.runtime.reload(); } catch {} }, 800);
           }
         } catch (e) {
-          sendResponse({ ok: false, error: String(e?.message || e) });
+          const msg = String(e?.message || e || '');
+          sendResponse({
+            ok: false,
+            error: msg || 'Update failed',
+            hint: 'Install the latest host from the alpha release once, then retry.'
+          });
         }
         return;
       }

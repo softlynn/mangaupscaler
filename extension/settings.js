@@ -299,7 +299,16 @@ async function init(){
         const resp = await chrome.runtime.sendMessage({ type: 'UPDATE_ALL' }).catch(()=>null);
         if (!updateStatus) return;
         if (!resp || !resp.ok) {
-          updateStatus.textContent = 'Update check failed.';
+          const err = String(resp?.error || resp?.message || '').trim();
+          if (err) {
+            updateStatus.textContent = `Update check failed: ${err}`;
+          } else {
+            updateStatus.textContent = 'Update check failed.';
+          }
+          // If the native host doesn't support updates yet, guide the user to install the latest host once.
+          if (err && (err.toLowerCase().includes('unknown command') || err.toLowerCase().includes('native host'))) {
+            try { chrome.tabs.create({ url: 'https://github.com/softlynn/mangaupscaler/releases/tag/alpha' }); } catch {}
+          }
           return;
         }
         const parts = [];
@@ -313,6 +322,7 @@ async function init(){
           else if (resp.extension.available) parts.push('Extension update: available');
           else parts.push('Extension update: none');
         }
+        if (!parts.length) parts.push('No update info.');
         updateStatus.textContent = parts.join(' • ');
       } finally {
         checkUpdatesBtn.textContent = 'Check for updates';
