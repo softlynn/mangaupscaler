@@ -10,7 +10,10 @@
 ### 🧈 Smoothness
 - 🧩 AI streaming: build the final `Blob` directly from streamed chunks (avoids extra full-buffer copies)
 - 🕸️ Prefetch: keep short-lived references to prefetch `Image` objects (prevents early-GC request cancels on some browsers)
-- 👀 Preload timing: slightly earlier “near viewport” window when preload slider > 0
+- 👀 Preload timing: swap cached AI panels earlier (before they become visible) to avoid “pop-in” flicker
+- 🖼️ Page priming: start loading upcoming *original* page panels earlier (reduces visible load/flicker on scroll)
+- 🧠 Decode-first swap: pre-decode cached `blob:` URLs before swapping into the page (reduces brief blank frames)
+- 📊 Status UI: simplify “Ahead” counters to `AI cached` + `Page ready`
 
 ### 🛡️ Stability / Compatibility
 - 🧹 Cleanup: unobserve removed `<img>` nodes to keep `IntersectionObserver` bookkeeping clean on infinite-scroll readers

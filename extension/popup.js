@@ -143,12 +143,11 @@ async function refreshPreStatus(){
     if (!resp || typeof resp !== 'object') { preStatus.textContent = ''; return; }
     const t = Number(resp.target || 0);
     const c = Number(resp.cached || 0);
-    const e = Number(resp.enhanced || 0);
-    const f = Number(resp.prefetched || 0);
+    const r = Number(resp.pageReady || 0);
     const a = Number(resp.available || 0);
     if (t <= 0) { preStatus.textContent = ''; return; }
     const denom = a > 0 ? a : t;
-    preStatus.textContent = `Ahead: enhanced ${e}/${denom} • cached ${c}/${denom} • page prefetched ${f}/${denom}`;
+    preStatus.textContent = `Ahead: AI cached ${c}/${denom} • Page ready ${r}/${denom}`;
   } catch {
     if (preStatus) preStatus.textContent = '';
   }

@@ -49,7 +49,7 @@ let io = null;
 let visibleScores = new Map(); // Map<img, intersectionArea>
 let lastHostStartAt = 0;
 let canvasOverlays = new WeakMap(); // WeakMap<img, { wrapper: HTMLElement, canvas: HTMLCanvasElement }>
-let preloadStatus = { target: 0, cached: 0, enhanced: 0, prefetched: 0, available: 0, updatedAt: 0, currentUrl: '' };
+let preloadStatus = { target: 0, cached: 0, pageReady: 0, available: 0, updatedAt: 0, currentUrl: '' };
 let pagePrefetch = new Map(); // url -> untilMs
 let pagePrefetchInflight = new Map(); // url -> Image (keeps GC from canceling prefetch)
 let enhancedPreloadCache = new Map(); // key -> { blob, contentType, model, byteLength, createdAt, lastUsedAt }
@@ -1028,6 +1028,57 @@ function prefetchUrl(url){
   } catch {}
 }
 
+function isPageImageReady(imgEl, url){
+  try{
+    if (!imgEl) return false;
+    if (imgEl.complete && imgEl.naturalWidth > 0) return true;
+    if (!url) return false;
+    const until = Number(pagePrefetch.get(url) || 0);
+    return until && Date.now() < until;
+  } catch {
+    return false;
+  }
+}
+
+async function predecodeImageUrl(url, timeoutMs=8000){
+  if (!url) return false;
+  try{
+    const im = new Image();
+    im.decoding = 'async';
+    im.src = url;
+    if (typeof im.decode === 'function') {
+      const t = new Promise((_, rej) => setTimeout(() => rej(new Error('decode timeout')), timeoutMs));
+      await Promise.race([im.decode(), t]);
+      return true;
+    }
+    await new Promise((resolve, reject) => {
+      const t = setTimeout(() => { cleanup(); reject(new Error('preload timeout')); }, timeoutMs);
+      const cleanup = () => {
+        clearTimeout(t);
+        im.onload = null;
+        im.onerror = null;
+      };
+      im.onload = () => { cleanup(); resolve(true); };
+      im.onerror = () => { cleanup(); reject(new Error('preload error')); };
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function primePageImage(imgEl){
+  try{
+    const url = getBestImageUrl(imgEl);
+    if (!url || !isHttpUrl(url)) return false;
+    prefetchUrl(url);
+    touchPagePreload(imgEl, url);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function scheduleAfterCooldown(preload){
   cooldownRetryPreload = !!preload;
   if (cooldownRetryTimer) return;
@@ -1207,23 +1258,19 @@ function computePreloadStatus(currentImg){
   const next = getNextCandidateImages(currentImg, target);
   const available = next.length;
   let cached = 0;
-  let enhanced = 0;
-  let prefetched = 0;
+  let pageReady = 0;
   for (const ni of next){
-    if (ni?.dataset?.muUpscaled === '1') enhanced++;
     const url = getBestImageUrl(ni);
     if (!url || !isHttpUrl(url)) continue;
     const key = getPreloadKeyForUrl(url);
     const ok = (String(ni.dataset?.muPreloadKey || '') === key) && (Number(ni.dataset?.muPreloadUntil || 0) > Date.now());
     if (ok) cached++;
-    const u2 = pagePrefetch.get(url) || 0;
-    if (u2 && Date.now() < u2) prefetched++;
+    if (isPageImageReady(ni, url)) pageReady++;
   }
   preloadStatus = {
     target,
     cached,
-    enhanced,
-    prefetched,
+    pageReady,
     available,
     updatedAt: Date.now(),
     currentUrl: String(getBestImageUrl(currentImg) || '')
@@ -1236,8 +1283,19 @@ function isNearViewport(imgEl){
     const vh = window.innerHeight || 1;
     const baseAhead = isWeebCentral() ? 2.0 : 1.25;
     const wantPreload = Number(settings.preUpscaleCount || 0) > 0;
-    const ahead = wantPreload ? Math.max(baseAhead, 1.75) : baseAhead;
+    const ahead = wantPreload ? Math.max(baseAhead, isWeebCentral() ? 2.4 : 2.2) : baseAhead;
     return (r.top < vh * ahead) && (r.bottom > -vh * 0.25);
+  } catch {
+    return false;
+  }
+}
+
+function isSwapAheadWindow(imgEl){
+  try{
+    const r = imgEl.getBoundingClientRect();
+    const vh = window.innerHeight || 1;
+    const ahead = isWeebCentral() ? 3.2 : 2.8;
+    return (r.top < vh * ahead) && (r.bottom > -vh * 0.35);
   } catch {
     return false;
   }
@@ -1252,16 +1310,16 @@ function maybeToastPreloadProgress(currentImg){
   const available = next.length;
   if (available <= 0) return;
   let cached = 0;
-  let enhanced = 0;
+  let pageReady = 0;
   for (const ni of next){
-    if (ni?.dataset?.muUpscaled === '1') enhanced++;
     const url = getBestImageUrl(ni);
     if (!url || !isHttpUrl(url)) continue;
     const key = getPreloadKeyForUrl(url);
     const ok = (String(ni.dataset?.muPreloadKey || '') === key) && (Number(ni.dataset?.muPreloadUntil || 0) > Date.now());
     if (ok) cached++;
+    if (isPageImageReady(ni, url)) pageReady++;
   }
-  const msg = `Ahead: enhanced ${enhanced}/${available} • cached ${cached}/${available} (slider ${target})`;
+  const msg = `Ahead (${available}): AI cached ${cached}/${available} • Page ready ${pageReady}/${available}`;
   const now = Date.now();
   if (msg === lastPreToastMsg && (now - lastPreToastAt) < 2500) return;
   if ((now - lastPreToastAt) < 900) return;
@@ -1287,7 +1345,11 @@ function isHostCacheWarm(imgEl){
 async function preSwapFromHostIfWarm(imgEl, opts={}){
   if (!imgEl) return false;
   if (imgEl.dataset?.muUpscaled === '1') return false;
-  if (!opts.force && !isNearViewport(imgEl)) return false;
+  if (opts.force) {
+    if (!isSwapAheadWindow(imgEl)) return false;
+  } else {
+    if (!isNearViewport(imgEl)) return false;
+  }
   if (!isHostCacheWarm(imgEl)) return false;
   if (preSwapBusy) return false;
 
@@ -1295,8 +1357,7 @@ async function preSwapFromHostIfWarm(imgEl, opts={}){
   if (!src || !isHttpUrl(src)) return false;
 
   // Ensure the page is also loading this image (prevents "blank page" while scrolling).
-  prefetchUrl(src);
-  touchPagePreload(imgEl, src);
+  primePageImage(imgEl);
 
   preSwapBusy = true;
   try{
@@ -1306,6 +1367,9 @@ async function preSwapFromHostIfWarm(imgEl, opts={}){
     const outBlob = ai.blob || null;
 
     const setAndWait = async (newSrc, isObj) => {
+      if (isObj) {
+        try { await predecodeImageUrl(newSrc, 9000); } catch {}
+      }
       replaceImgSrc(imgEl, newSrc, isObj);
       await waitForImageLoad(imgEl, 20000);
     };
@@ -1343,6 +1407,9 @@ async function processImageElement(imgEl){
   const src = getBestImageUrl(imgEl);
   if (!src || isEmptyBase64DataUrl(src)) throw new Error('No usable image source');
 
+  // Start loading the original page image ASAP (reduces visible load/flicker as panels approach view).
+  try { primePageImage(imgEl); } catch {}
+
   // If already upscaled by us, skip
   if (imgEl.dataset.muUpscaled === '1') return;
 
@@ -1370,6 +1437,9 @@ async function processImageElement(imgEl){
     sendTelemetry('enhance_success', { hostElapsedMs: hostElapsed, model: String(model || ''), contentType: String(outContentType || ''), swap: outIsObjectUrl ? 'blob' : 'data' }, 8000);
 
     const setAndWait = async (newSrc, isObj) => {
+      if (isObj) {
+        try { await predecodeImageUrl(newSrc, 9000); } catch {}
+      }
       replaceImgSrc(imgEl, newSrc, isObj);
       await waitForImageLoad(imgEl, 20000);
     };
@@ -1467,6 +1537,7 @@ async function processOnce(preload, showStatus){
     try{
       const nextOne = getNextCandidateImages(img, 1)[0];
       if (nextOne) {
+        try { primePageImage(nextOne); } catch {}
         await preloadAiForImage(nextOne);
         // Try to swap immediately if the element is already in the DOM.
         // Force on WeebCentral (it usually only keeps the next panel in DOM).
@@ -1482,8 +1553,10 @@ async function processOnce(preload, showStatus){
       for (const ni of next){
         try{
           // Warm host cache for upcoming pages. Swapping happens just-in-time as they approach view.
+          try { primePageImage(ni); } catch {}
           await preloadAiForImage(ni);
-          try { await preSwapFromHostIfWarm(ni); } catch {}
+          // Swap ahead-of-time to avoid visible flicker as the panel scrolls into view.
+          try { await preSwapFromHostIfWarm(ni, { force: true }); } catch {}
           try { maybeToastPreloadProgress(img); } catch {}
         }catch(e){
           const msg = String(e?.message || e || '');
@@ -1563,7 +1636,9 @@ function startAuto(){
           if ((Date.now() - lastScrollAt) < 120) break; // user resumed scrolling
           if (!ni || ni.dataset?.muUpscaled === '1') continue;
           try{
+            try { primePageImage(ni); } catch {}
             await preloadAiForImage(ni);
+            try { await preSwapFromHostIfWarm(ni, { force: true }); } catch {}
           } catch {
             // ignore per-item warm errors
           }
