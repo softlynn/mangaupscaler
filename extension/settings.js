@@ -288,6 +288,37 @@ async function init(){
     await chrome.runtime.sendMessage({ type:'TRAY_STOP' }).catch(()=>{});
     btn.textContent = 'Stop tray';
   });
+
+  const checkUpdatesBtn = $('checkUpdates');
+  const updateStatus = $('updateStatus');
+  if (checkUpdatesBtn) {
+    checkUpdatesBtn.addEventListener('click', async ()=>{
+      checkUpdatesBtn.textContent = 'Checking...';
+      if (updateStatus) updateStatus.textContent = '';
+      try{
+        const resp = await chrome.runtime.sendMessage({ type: 'UPDATE_ALL' }).catch(()=>null);
+        if (!updateStatus) return;
+        if (!resp || !resp.ok) {
+          updateStatus.textContent = 'Update check failed.';
+          return;
+        }
+        const parts = [];
+        if (resp.host) {
+          if (resp.host.available && resp.host.launched) parts.push('Host update: started');
+          else if (resp.host.available) parts.push('Host update: available');
+          else parts.push('Host update: none');
+        }
+        if (resp.extension) {
+          if (resp.extension.available && resp.extension.applied) parts.push('Extension update: applied (reloading…)');
+          else if (resp.extension.available) parts.push('Extension update: available');
+          else parts.push('Extension update: none');
+        }
+        updateStatus.textContent = parts.join(' • ');
+      } finally {
+        checkUpdatesBtn.textContent = 'Check for updates';
+      }
+    });
+  }
 }
 
 init().catch(console.error);

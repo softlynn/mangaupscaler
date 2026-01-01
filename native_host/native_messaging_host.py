@@ -122,6 +122,44 @@ def _launch_tray() -> bool:
   except Exception:
     return False
 
+def _run_tray_command(args: list[str], timeout_sec: float = 180.0) -> dict:
+  exe = _find_tray_exe()
+  if exe:
+    cmd = [exe, *args]
+  else:
+    script = os.path.join(ROOT, "tray_app.py")
+    if not os.path.exists(script):
+      return {"ok": False, "error": "tray_app.py not found"}
+    cmd = [_find_pythonw(), script, *args]
+
+  creationflags = 0
+  if os.name == "nt":
+    creationflags = 0x08000000  # CREATE_NO_WINDOW
+  try:
+    p = subprocess.run(
+      cmd,
+      cwd=ROOT,
+      stdin=subprocess.DEVNULL,
+      stdout=subprocess.PIPE,
+      stderr=subprocess.PIPE,
+      timeout=timeout_sec,
+      creationflags=creationflags
+    )
+    out = (p.stdout or b"").decode("utf-8", "ignore").strip()
+    if p.returncode == 0 and out:
+      try:
+        return json.loads(out)
+      except Exception:
+        return {"ok": True, "raw": out}
+    if p.returncode == 0:
+      return {"ok": True}
+    err = (p.stderr or b"").decode("utf-8", "ignore").strip()
+    return {"ok": False, "error": err or f"tray exit code {p.returncode}"}
+  except subprocess.TimeoutExpired:
+    return {"ok": False, "error": "Update timed out"}
+  except Exception as e:
+    return {"ok": False, "error": str(e)}
+
 def _stop_tray() -> bool:
   stopped = False
   try:
@@ -194,6 +232,10 @@ def _handle(msg: dict) -> dict:
     return {"ok": _launch_tray()}
   if cmd == "tray_stop":
     return {"ok": _stop_tray()}
+  if cmd == "update_all":
+    ext_id = str((msg or {}).get("extensionId") or "")
+    # Runs the tray in headless updater mode and returns a JSON result.
+    return _run_tray_command(["--update-all", "--extension-id", ext_id], timeout_sec=240.0)
   if cmd == "status":
     return {"ok": True, "running": _ping_host()}
   return {"ok": False, "error": "Unknown command"}

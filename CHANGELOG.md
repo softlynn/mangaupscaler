@@ -19,3 +19,7 @@
 
 ### 🛡️ Stability / Compatibility
 - 🧹 Cleanup: unobserve removed `<img>` nodes to keep `IntersectionObserver` bookkeeping clean on infinite-scroll readers
+
+### 🆙 Updates (alpha)
+- 🧩 Settings: add “Check for updates” to update both the local host + unpacked extension (alpha channel)
+- 🧰 Host: add a headless updater mode (download alpha assets, silent host installer launch, overwrite unpacked extension files)

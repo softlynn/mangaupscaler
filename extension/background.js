@@ -474,6 +474,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return;
       }
 
+      if (msg?.type === 'UPDATE_ALL') {
+        // Updates are performed by the native tray host in headless mode.
+        // Note: unpacked extensions can be updated on disk, but Chrome still needs a reload.
+        try{
+          const extId = chrome.runtime.id;
+          const resp = await chrome.runtime.sendNativeMessage(NATIVE_HOST, { cmd: 'update_all', extensionId: extId });
+          const ok = !!resp?.ok;
+          sendResponse(resp || { ok: false, error: 'No response' });
+          if (ok && resp?.extension?.applied) {
+            // Give filesystem writes a moment to flush, then reload this extension.
+            setTimeout(() => { try { chrome.runtime.reload(); } catch {} }, 800);
+          }
+        } catch (e) {
+          sendResponse({ ok: false, error: String(e?.message || e) });
+        }
+        return;
+      }
+
       if (msg?.type === 'TELEMETRY_EVENT') {
         const cfg = await loadTelemetryCfg();
         if (!cfg.enabled) { sendResponse({ ok: true, dropped: true }); return; }

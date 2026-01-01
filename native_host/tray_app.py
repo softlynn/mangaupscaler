@@ -10,6 +10,9 @@ import urllib.request
 import urllib.error
 import ctypes
 from datetime import datetime
+import argparse
+import tempfile
+import zipfile
 
 import pystray
 from PIL import Image, ImageDraw
@@ -73,6 +76,8 @@ PID_PATH = os.path.join(ROOT, "tray.pid")
 UPDATE_API_URL = "https://api.github.com/repos/softlynn/mangaupscaler/releases/tags/alpha"
 INSTALLER_ASSET_NAME = "MangaUpscalerHostSetup.exe"
 INSTALLER_FALLBACK_URL = f"https://github.com/softlynn/mangaupscaler/releases/download/alpha/{INSTALLER_ASSET_NAME}"
+EXTENSION_ASSET_NAME = "MangaUpscalerExtension.zip"
+EXTENSION_FALLBACK_URL = f"https://github.com/softlynn/mangaupscaler/releases/download/alpha/{EXTENSION_ASSET_NAME}"
 
 
 def _find_pythonw() -> str:
@@ -289,6 +294,27 @@ def _fetch_latest_installer_info() -> tuple[str, str] | None:
   except Exception:
     return None
 
+def _fetch_latest_extension_info() -> tuple[str, str] | None:
+  try:
+    req = urllib.request.Request(
+      UPDATE_API_URL,
+      headers={
+        "User-Agent": "MangaUpscalerHost",
+        "Accept": "application/vnd.github+json"
+      }
+    )
+    with urllib.request.urlopen(req, timeout=8) as resp:
+      if resp.status != 200:
+        return None
+      data = json.loads(resp.read().decode("utf-8", "ignore") or "{}")
+    assets = data.get("assets") or []
+    for a in assets:
+      if str(a.get("name") or "") == EXTENSION_ASSET_NAME:
+        return (str(a.get("updated_at") or ""), str(a.get("browser_download_url") or ""))
+    return (str(data.get("published_at") or data.get("created_at") or data.get("updated_at") or ""), EXTENSION_FALLBACK_URL)
+  except Exception:
+    return None
+
 def _open_url(url: str):
   try:
     if url:
@@ -298,7 +324,6 @@ def _open_url(url: str):
 
 def _download_to_temp(url: str) -> str | None:
   try:
-    import tempfile
     dest = os.path.join(tempfile.gettempdir(), f"{INSTALLER_ASSET_NAME}")
     req = urllib.request.Request(url, headers={"User-Agent": "MangaUpscalerHost"})
     with urllib.request.urlopen(req, timeout=20) as resp:
@@ -313,6 +338,103 @@ def _download_to_temp(url: str) -> str | None:
     return dest
   except Exception:
     return None
+
+def _download_url_to_temp(url: str, filename: str) -> str | None:
+  try:
+    dest = os.path.join(tempfile.gettempdir(), filename)
+    req = urllib.request.Request(url, headers={"User-Agent": "MangaUpscalerHost"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+      if resp.status != 200:
+        return None
+      with open(dest, "wb") as f:
+        while True:
+          chunk = resp.read(1024 * 256)
+          if not chunk:
+            break
+          f.write(chunk)
+    return dest
+  except Exception:
+    return None
+
+def _run_installer_silent(path: str) -> bool:
+  try:
+    if not path or not os.path.exists(path):
+      return False
+    args = [path, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-"]
+    subprocess.Popen(args, cwd=os.path.dirname(path))
+    return True
+  except Exception:
+    return False
+
+def _find_extension_path_windows(extension_id: str) -> str | None:
+  try:
+    ext_id = (extension_id or "").strip()
+    if not ext_id:
+      return None
+    roots = [
+      os.path.join(os.environ.get("LOCALAPPDATA", ""), "Google", "Chrome", "User Data"),
+      os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Edge", "User Data"),
+      os.path.join(os.environ.get("LOCALAPPDATA", ""), "BraveSoftware", "Brave-Browser", "User Data"),
+      os.path.join(os.environ.get("LOCALAPPDATA", ""), "Chromium", "User Data"),
+    ]
+    pref_names = ["Secure Preferences", "Preferences"]
+    for root in [r for r in roots if r and os.path.isdir(r)]:
+      for prof in os.listdir(root):
+        if not (prof == "Default" or prof.startswith("Profile ")):
+          continue
+        prof_dir = os.path.join(root, prof)
+        for pn in pref_names:
+          p = os.path.join(prof_dir, pn)
+          if not os.path.exists(p):
+            continue
+          try:
+            with open(p, "r", encoding="utf-8", errors="ignore") as f:
+              data = json.load(f) or {}
+            settings = (((data.get("extensions") or {}).get("settings")) or {})
+            entry = settings.get(ext_id) or {}
+            path = str((entry.get("path") or "")).strip()
+            if path and os.path.isdir(path) and os.path.exists(os.path.join(path, "manifest.json")):
+              return path
+          except Exception:
+            continue
+  except Exception:
+    return None
+  return None
+
+def _apply_extension_update(zip_path: str, extension_id: str) -> tuple[bool, str]:
+  if os.name != "nt":
+    return (False, "unsupported_os")
+  dest = _find_extension_path_windows(extension_id)
+  if not dest:
+    return (False, "extension_path_not_found")
+  if not zip_path or not os.path.exists(zip_path):
+    return (False, "missing_zip")
+
+  try:
+    tmp_dir = tempfile.mkdtemp(prefix="mu_ext_")
+    with zipfile.ZipFile(zip_path, "r") as z:
+      z.extractall(tmp_dir)
+    for root, _dirs, files in os.walk(tmp_dir):
+      rel = os.path.relpath(root, tmp_dir)
+      out_dir = dest if rel == "." else os.path.join(dest, rel)
+      os.makedirs(out_dir, exist_ok=True)
+      for fn in files:
+        src = os.path.join(root, fn)
+        dst = os.path.join(out_dir, fn)
+        try:
+          tmp = dst + ".tmp"
+          with open(src, "rb") as fsrc, open(tmp, "wb") as fdst:
+            fdst.write(fsrc.read())
+          os.replace(tmp, dst)
+        except Exception:
+          try:
+            import shutil
+            shutil.copy2(src, dst)
+          except Exception:
+            pass
+    return (True, dest)
+  except Exception:
+    return (False, "extract_copy_failed")
 
 def _check_update_available(cfg: dict) -> tuple[bool, str, str]:
   info = _fetch_latest_installer_info()
@@ -344,7 +466,11 @@ def _run_update_flow(cfg: dict, ctl: HostController, icon: pystray.Icon | None, 
   path = _download_to_temp(url) if url else None
   if path:
     try:
-      subprocess.Popen([path], cwd=os.path.dirname(path))
+      silent = bool(cfg.get("auto_update_host_silent", True))
+      if silent:
+        _run_installer_silent(path)
+      else:
+        subprocess.Popen([path], cwd=os.path.dirname(path))
     except Exception:
       _open_url(url)
   else:
@@ -482,8 +608,64 @@ def _on_toggle_auto_update(icon, item):
   cfg = _load_config()
   _toggle_auto_update(cfg)
 
+def run_update_all(extension_id: str) -> dict:
+  cfg = _load_config()
+  out: dict = {"ok": True, "host": {"checked": True}, "extension": {"checked": True}}
+
+  # Host update (launch installer in background if newer)
+  ok_h, remote_updated_at_h, url_h = _check_update_available(cfg)
+  out["host"].update({"available": bool(ok_h), "updated_at": remote_updated_at_h, "url": url_h})
+  if ok_h:
+    cfg["last_seen_installer_updated_at"] = remote_updated_at_h or cfg.get("last_seen_installer_updated_at", "")
+    _save_config(cfg)
+    try:
+      HostController().stop()
+    except Exception:
+      pass
+    path = _download_to_temp(url_h) if url_h else None
+    if path:
+      out["host"]["launched"] = bool(_run_installer_silent(path))
+    else:
+      out["host"]["launched"] = False
+
+  # Extension update (download zip and overwrite unpacked folder)
+  info_e = _fetch_latest_extension_info()
+  if not info_e:
+    out["extension"].update({"available": False, "error": "no_release_info"})
+    return out
+
+  remote_updated_at_e, url_e = info_e
+  local_seen = str(cfg.get("last_seen_extension_updated_at") or "")
+  rt = _parse_iso(remote_updated_at_e)
+  lt = _parse_iso(local_seen)
+  ok_e = bool(rt and (not lt or rt > lt))
+  out["extension"].update({"available": ok_e, "updated_at": remote_updated_at_e, "url": url_e})
+  if ok_e:
+    zip_path = _download_url_to_temp(url_e, EXTENSION_ASSET_NAME) if url_e else None
+    ok_apply, info_apply = _apply_extension_update(zip_path or "", extension_id)
+    out["extension"].update({"applied": bool(ok_apply), "path": info_apply if ok_apply else "", "error": "" if ok_apply else info_apply})
+    if ok_apply:
+      cfg["last_seen_extension_updated_at"] = remote_updated_at_e or cfg.get("last_seen_extension_updated_at", "")
+      _save_config(cfg)
+
+  return out
+
 
 def main():
+  # Headless updater mode (used by the extension's "Check for updates").
+  try:
+    if "--update-all" in sys.argv:
+      ap = argparse.ArgumentParser(add_help=True)
+      ap.add_argument("--update-all", action="store_true")
+      ap.add_argument("--extension-id", default="")
+      args = ap.parse_args()
+      res = run_update_all(args.extension_id or "")
+      print(json.dumps(res, ensure_ascii=False))
+      return 0
+  except Exception:
+    # Fall through to normal tray mode.
+    pass
+
   _ensure_single_instance_or_exit()
   _write_pid()
   ctl = HostController()
@@ -516,4 +698,4 @@ def main():
 
 
 if __name__ == "__main__":
-  main()
+  raise SystemExit(main())
