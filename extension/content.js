@@ -1,4 +1,4 @@
-// Manga Upscaler content script (v1.1.0)
+// Manga Upscaler content script (v0.2.4-alpha)
 // Enhances the currently visible manga panel (largest visible image) by:
 // 1) fetching the image data safely (via background to avoid CORS taint)
 // 2) sending it to the local AI host (MangaJaNai / IllustrationJaNai)
@@ -51,6 +51,7 @@ let lastHostStartAt = 0;
 let canvasOverlays = new WeakMap(); // WeakMap<img, { wrapper: HTMLElement, canvas: HTMLCanvasElement }>
 let preloadStatus = { target: 0, cached: 0, enhanced: 0, prefetched: 0, available: 0, updatedAt: 0, currentUrl: '' };
 let pagePrefetch = new Map(); // url -> untilMs
+let pagePrefetchInflight = new Map(); // url -> Image (keeps GC from canceling prefetch)
 let enhancedPreloadCache = new Map(); // key -> { blob, contentType, model, byteLength, createdAt, lastUsedAt }
 let enhancedPreloadTotalBytes = 0;
 let autoPending = false;
@@ -752,29 +753,33 @@ async function enhanceViaHost(srcUrl, opts={}){
     const contentType = String(resp.contentType || 'image/png');
     if (!streamId || !chunkCount || !total) throw new Error('AI returned invalid stream');
 
-    const out = new Uint8Array(total);
-    let offset = 0;
-    for (let i = 0; i < chunkCount; i++) {
-      let r = await chrome.runtime.sendMessage({ type: 'AI_STREAM_CHUNK', streamId, index: i });
-      if (!r?.ok) throw new Error(r?.error || 'Stream chunk failed');
-      let ab = normalizeToArrayBuffer(r.chunk);
-      if (!ab && r?.b64) {
-        ab = base64ToArrayBuffer(r.b64);
+    const parts = [];
+    let totalGot = 0;
+    try{
+      for (let i = 0; i < chunkCount; i++) {
+        let r = await chrome.runtime.sendMessage({ type: 'AI_STREAM_CHUNK', streamId, index: i });
+        if (!r?.ok) throw new Error(r?.error || 'Stream chunk failed');
+        let ab = normalizeToArrayBuffer(r.chunk);
+        if (!ab && r?.b64) {
+          ab = base64ToArrayBuffer(r.b64);
+        }
+        if (!ab) {
+          // Retry via base64 transport as a last resort (slower but very robust).
+          const r2 = await chrome.runtime.sendMessage({ type: 'AI_STREAM_CHUNK_B64', streamId, index: i });
+          if (!r2?.ok) throw new Error(r2?.error || 'Stream chunk failed');
+          if (!r2?.b64) throw new Error('Invalid stream chunk');
+          ab = base64ToArrayBuffer(r2.b64);
+        }
+        const u8 = new Uint8Array(ab);
+        totalGot += u8.length;
+        parts.push(u8);
       }
-      if (!ab) {
-        // Retry via base64 transport as a last resort (slower but very robust).
-        const r2 = await chrome.runtime.sendMessage({ type: 'AI_STREAM_CHUNK_B64', streamId, index: i });
-        if (!r2?.ok) throw new Error(r2?.error || 'Stream chunk failed');
-        if (!r2?.b64) throw new Error('Invalid stream chunk');
-        ab = base64ToArrayBuffer(r2.b64);
-      }
-      const u8 = new Uint8Array(ab);
-      out.set(u8, offset);
-      offset += u8.length;
+    } finally {
+      chrome.runtime.sendMessage({ type: 'AI_STREAM_DELETE', streamId }).catch(()=>{});
     }
-    chrome.runtime.sendMessage({ type: 'AI_STREAM_DELETE', streamId }).catch(()=>{});
 
-    const blob = new Blob([out.buffer.slice(0, offset)], { type: contentType });
+    if (totalGot !== total) throw new Error('AI returned invalid stream length');
+    const blob = new Blob(parts, { type: contentType });
     if (!blob.size) throw new Error('AI returned empty image');
     const objectUrl = URL.createObjectURL(blob);
     return {
@@ -1012,6 +1017,14 @@ function prefetchUrl(url){
     im.decoding = 'async';
     im.referrerPolicy = 'no-referrer';
     im.src = url;
+
+    // Hold a reference briefly; some browsers may cancel requests if the Image is GC'd too early.
+    pagePrefetchInflight.set(url, im);
+    setTimeout(() => { try { pagePrefetchInflight.delete(url); } catch {} }, 15000);
+    if (pagePrefetchInflight.size > 24) {
+      const oldest = pagePrefetchInflight.keys().next().value;
+      if (oldest) pagePrefetchInflight.delete(oldest);
+    }
   } catch {}
 }
 
@@ -1048,25 +1061,30 @@ async function fetchEnhancedBlobForUrl(srcUrl, opts={}){
     const total = Number(resp.byteLength || 0);
     if (!streamId || !chunkCount || !total) throw new Error('AI returned invalid stream');
 
-    const out = new Uint8Array(total);
-    let offset = 0;
-    for (let i = 0; i < chunkCount; i++) {
-      let r = await chrome.runtime.sendMessage({ type: 'AI_STREAM_CHUNK', streamId, index: i });
-      if (!r?.ok) throw new Error(r?.error || 'Stream chunk failed');
-      let ab = normalizeToArrayBuffer(r.chunk);
-      if (!ab && r?.b64) ab = base64ToArrayBuffer(r.b64);
-      if (!ab) {
-        const r2 = await chrome.runtime.sendMessage({ type: 'AI_STREAM_CHUNK_B64', streamId, index: i });
-        if (!r2?.ok) throw new Error(r2?.error || 'Stream chunk failed');
-        if (!r2?.b64) throw new Error('Invalid stream chunk');
-        ab = base64ToArrayBuffer(r2.b64);
+    const parts = [];
+    let totalGot = 0;
+    try{
+      for (let i = 0; i < chunkCount; i++) {
+        let r = await chrome.runtime.sendMessage({ type: 'AI_STREAM_CHUNK', streamId, index: i });
+        if (!r?.ok) throw new Error(r?.error || 'Stream chunk failed');
+        let ab = normalizeToArrayBuffer(r.chunk);
+        if (!ab && r?.b64) ab = base64ToArrayBuffer(r.b64);
+        if (!ab) {
+          const r2 = await chrome.runtime.sendMessage({ type: 'AI_STREAM_CHUNK_B64', streamId, index: i });
+          if (!r2?.ok) throw new Error(r2?.error || 'Stream chunk failed');
+          if (!r2?.b64) throw new Error('Invalid stream chunk');
+          ab = base64ToArrayBuffer(r2.b64);
+        }
+        const u8 = new Uint8Array(ab);
+        totalGot += u8.length;
+        parts.push(u8);
       }
-      const u8 = new Uint8Array(ab);
-      out.set(u8, offset);
-      offset += u8.length;
+    } finally {
+      chrome.runtime.sendMessage({ type: 'AI_STREAM_DELETE', streamId }).catch(()=>{});
     }
-    chrome.runtime.sendMessage({ type: 'AI_STREAM_DELETE', streamId }).catch(()=>{});
-    const blob = new Blob([out.buffer.slice(0, offset)], { type: contentType });
+
+    if (totalGot !== total) throw new Error('AI returned invalid stream length');
+    const blob = new Blob(parts, { type: contentType });
     if (!blob.size) throw new Error('AI returned empty image');
     return { blob, contentType, model: String(resp.model || '') };
   }
@@ -1216,7 +1234,9 @@ function isNearViewport(imgEl){
   try{
     const r = imgEl.getBoundingClientRect();
     const vh = window.innerHeight || 1;
-    const ahead = isWeebCentral() ? 2.0 : 1.25;
+    const baseAhead = isWeebCentral() ? 2.0 : 1.25;
+    const wantPreload = Number(settings.preUpscaleCount || 0) > 0;
+    const ahead = wantPreload ? Math.max(baseAhead, 1.75) : baseAhead;
     return (r.top < vh * ahead) && (r.bottom > -vh * 0.25);
   } catch {
     return false;
@@ -1639,19 +1659,36 @@ function startAuto(){
 
   // DOM changes (lazy-loaded pages): observe new <img> elements.
   const mo = new MutationObserver((muts)=>{
+    let changed = false;
     for (const m of muts){
       for (const n of Array.from(m.addedNodes || [])){
         if (!n) continue;
         if (n.tagName === 'IMG') {
           try { io && io.observe(n); } catch {}
+          changed = true;
         } else if (n.querySelectorAll) {
           for (const img of Array.from(n.querySelectorAll('img'))){
             try { io && io.observe(img); } catch {}
+            changed = true;
+          }
+        }
+      }
+      for (const n of Array.from(m.removedNodes || [])){
+        if (!n) continue;
+        if (n.tagName === 'IMG') {
+          try { io && io.unobserve(n); } catch {}
+          try { visibleScores.delete(n); } catch {}
+          changed = true;
+        } else if (n.querySelectorAll) {
+          for (const img of Array.from(n.querySelectorAll('img'))){
+            try { io && io.unobserve(img); } catch {}
+            try { visibleScores.delete(img); } catch {}
+            changed = true;
           }
         }
       }
     }
-    schedule();
+    if (changed) schedule();
   });
   mo.observe(document.documentElement, { childList: true, subtree: true });
 

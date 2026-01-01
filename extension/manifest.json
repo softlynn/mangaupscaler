@@ -1,7 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Manga Upscaler",
-  "version": "1.1.0",
+  "version": "0.2.4",
+  "version_name": "0.2.4-alpha",
   "description": "Upscale + enhance manga pages (sharper text, screentones). Auto-upscales the panel in view. Works on whitelisted sites.",
   "permissions": [
     "activeTab",

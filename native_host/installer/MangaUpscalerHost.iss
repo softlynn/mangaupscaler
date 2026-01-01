@@ -1,5 +1,5 @@
 #define MyAppName "Manga Upscaler Host"
-#define MyAppVersion "0.2.3"
+#define MyAppVersion "0.2.4"
 #define MyAppPublisher "Softlynn"
 #define MyTrayExe "MangaUpscalerHost.exe"
 #define MyNativeExe "MangaUpscalerNativeHost.exe"

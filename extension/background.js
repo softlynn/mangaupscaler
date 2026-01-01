@@ -55,17 +55,41 @@ const TELEMETRY_DEFAULT_UPLOAD_URL = 'https://script.google.com/macros/s/AKfycbz
 
 let hostOkUntil = 0;
 const AI_STREAM_CHUNK_SIZE = 256 * 1024; // 256KB
-const aiStreamStore = new Map(); // id -> { chunks: ArrayBuffer[], byteLength, contentType, model, hostError, elapsedMs, createdAt }
+const aiStreamStore = new Map(); // id -> { buffer: ArrayBuffer, byteLength, chunkSize, chunkCount, contentType, model, hostError, elapsedMs, createdAt }
 let tabScanTimer = null;
 let lastTrayState = null; // 'running' | 'stopped' | null
 let telemetryCfg = null; // { enabled: boolean, uploadUrl: string }
 let telemetryClientId = null;
+let settingsCache = { enabled: true, whitelist: {} };
+let settingsCacheLoaded = false;
+let settingsCachePromise = null;
+let ensureHostPromise = null;
+
+const mangaTabIds = new Set(); // tabId set for allowed manga sites (http/https only)
 
 function newStreamId(){
   try{
     if (crypto?.randomUUID) return crypto.randomUUID();
   } catch {}
   return `${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
+}
+
+async function ensureSettingsCache(){
+  if (settingsCacheLoaded) return settingsCache;
+  if (settingsCachePromise) return settingsCachePromise;
+  settingsCachePromise = (async ()=>{
+    try{
+      const s = await chrome.storage.sync.get({ enabled: true, whitelist: {} });
+      settingsCache = { enabled: !!s.enabled, whitelist: s.whitelist || {} };
+    } catch {
+      // keep defaults
+    } finally {
+      settingsCacheLoaded = true;
+      settingsCachePromise = null;
+    }
+    return settingsCache;
+  })();
+  return settingsCachePromise;
 }
 
 async function loadTelemetryCfg(){
@@ -100,21 +124,16 @@ async function getTelemetryClientId(){
   }
 }
 
-function splitArrayBuffer(buffer, chunkSize){
-  const chunks = [];
-  const u8 = new Uint8Array(buffer);
-  for (let i = 0; i < u8.length; i += chunkSize) {
-    chunks.push(u8.slice(i, i + chunkSize).buffer);
-  }
-  return chunks;
-}
-
 function storeAiStream({ buffer, contentType, model, hostError, elapsedMs }){
   const id = newStreamId();
-  const chunks = splitArrayBuffer(buffer, AI_STREAM_CHUNK_SIZE);
+  const byteLength = buffer?.byteLength || 0;
+  const chunkSize = AI_STREAM_CHUNK_SIZE;
+  const chunkCount = byteLength ? Math.ceil(byteLength / chunkSize) : 0;
   const entry = {
-    chunks,
-    byteLength: buffer.byteLength || 0,
+    buffer,
+    byteLength,
+    chunkSize,
+    chunkCount,
     contentType: contentType || 'application/octet-stream',
     model: model || '',
     hostError: hostError || '',
@@ -124,7 +143,7 @@ function storeAiStream({ buffer, contentType, model, hostError, elapsedMs }){
   aiStreamStore.set(id, entry);
   // Keep for a while; host inference can be slow and the service worker can be busy.
   setTimeout(() => aiStreamStore.delete(id), 5 * 60_000);
-  return { id, chunkCount: chunks.length };
+  return { id, chunkCount };
 }
 
 function ensureContextMenu() {
@@ -150,13 +169,78 @@ chrome.runtime.onStartup.addListener(() => {
   maybeAutoStartTray('startup').catch(()=>{});
 });
 
-chrome.tabs.onUpdated.addListener(() => scheduleTrayReconcile('tabs_updated'));
-chrome.tabs.onRemoved.addListener(() => scheduleTrayReconcile('tabs_removed'));
-chrome.tabs.onActivated.addListener(() => scheduleTrayReconcile('tabs_activated'));
-chrome.windows.onRemoved.addListener(() => scheduleTrayReconcile('window_removed'));
+let mangaTabsNeedFullRescan = true;
+let mangaTabsRescanPromise = null;
+
+async function rescanMangaTabs(){
+  if (mangaTabsRescanPromise) return mangaTabsRescanPromise;
+  mangaTabsRescanPromise = (async ()=>{
+    const s = await ensureSettingsCache();
+    mangaTabIds.clear();
+    if (!s?.enabled) return;
+    const tabs = await chrome.tabs.query({});
+    for (const t of tabs){
+      const tabId = t?.id;
+      if (typeof tabId !== 'number') continue;
+      const host = extractHost(t?.url);
+      if (!host) continue;
+      if (hostAllowed(host, s.whitelist || {})) mangaTabIds.add(tabId);
+    }
+  })().finally(()=>{ mangaTabsRescanPromise = null; });
+  return mangaTabsRescanPromise;
+}
+
+async function updateMangaTabFromUrl(tabId, url){
+  if (typeof tabId !== 'number') return;
+  const s = await ensureSettingsCache();
+  if (!s?.enabled) { mangaTabIds.delete(tabId); return; }
+  const host = extractHost(url);
+  if (!host) { mangaTabIds.delete(tabId); return; }
+  if (hostAllowed(host, s.whitelist || {})) mangaTabIds.add(tabId);
+  else mangaTabIds.delete(tabId);
+}
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  try{
+    if (changeInfo?.url) {
+      updateMangaTabFromUrl(tabId, changeInfo.url).then(()=>scheduleTrayReconcile('tabs_updated')).catch(()=>{});
+      return;
+    }
+    if (changeInfo?.status === 'complete' && tab?.url) {
+      updateMangaTabFromUrl(tabId, tab.url).then(()=>scheduleTrayReconcile('tabs_updated')).catch(()=>{});
+      return;
+    }
+  } catch {}
+});
+chrome.tabs.onRemoved.addListener((tabId) => {
+  try { mangaTabIds.delete(tabId); } catch {}
+  scheduleTrayReconcile('tabs_removed');
+});
+chrome.tabs.onCreated.addListener((tab) => {
+  try{
+    if (typeof tab?.id === 'number' && tab?.url) {
+      updateMangaTabFromUrl(tab.id, tab.url).then(()=>scheduleTrayReconcile('tabs_created')).catch(()=>{});
+    }
+  } catch {}
+});
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'sync') return;
-  if (changes.enabled || changes.whitelist) scheduleTrayReconcile('settings_changed');
+  try{
+    if (Object.prototype.hasOwnProperty.call(changes, 'enabled')) {
+      settingsCache.enabled = !!changes.enabled?.newValue;
+      settingsCacheLoaded = true;
+    }
+    if (Object.prototype.hasOwnProperty.call(changes, 'whitelist')) {
+      settingsCache.whitelist = changes.whitelist?.newValue || {};
+      settingsCacheLoaded = true;
+    }
+  } catch {
+    // ignore
+  }
+  if (changes.enabled || changes.whitelist) {
+    mangaTabsNeedFullRescan = true;
+    scheduleTrayReconcile('settings_changed');
+  }
   if (changes.telemetryEnabled || changes.telemetryUploadUrl) telemetryCfg = null;
 });
 
@@ -169,6 +253,12 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 
 async function delay(ms){
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function extractHost(url){
+  const s = String(url || '');
+  if (!s.startsWith('http://') && !s.startsWith('https://')) return '';
+  try { return new URL(s).hostname || ''; } catch { return ''; }
 }
 
 async function pingHost(force=false){
@@ -220,18 +310,13 @@ function hostAllowed(host, whitelist){
 
 async function countMangaTabs(){
   try{
-    const s = await chrome.storage.sync.get({ enabled: true, whitelist: {} });
+    const s = await ensureSettingsCache();
     if (!s?.enabled) return 0;
-    const tabs = await chrome.tabs.query({});
-    let count = 0;
-    for (const t of tabs){
-      const url = String(t?.url || '');
-      if (!url.startsWith('http://') && !url.startsWith('https://')) continue;
-      let host = '';
-      try { host = new URL(url).hostname; } catch { host = ''; }
-      if (hostAllowed(host, s.whitelist || {})) count++;
+    if (mangaTabsNeedFullRescan) {
+      mangaTabsNeedFullRescan = false;
+      await rescanMangaTabs();
     }
-    return count;
+    return mangaTabIds.size;
   } catch {
     return 0;
   }
@@ -265,8 +350,9 @@ function scheduleTrayReconcile(reason){
 
 async function maybeAutoStartTray(reason){
   try{
-    const s = await chrome.storage.sync.get({ enabled: true });
+    const s = await ensureSettingsCache();
     if (!s?.enabled) return false;
+    mangaTabsNeedFullRescan = true;
     scheduleTrayReconcile(reason || 'auto');
     return true;
   } catch {
@@ -291,12 +377,20 @@ async function stopNativeHost(reason){
 
 async function ensureHostRunning(reason){
   if (await pingHost()) return true;
-  await startNativeHost(reason);
-  for (let i = 0; i < 10; i++) {
-    if (await pingHost()) return true;
-    await delay(400);
-  }
-  return false;
+  if (ensureHostPromise) return ensureHostPromise;
+  ensureHostPromise = (async ()=>{
+    try{
+      await startNativeHost(reason);
+      for (let i = 0; i < 10; i++) {
+        if (await pingHost()) return true;
+        await delay(400);
+      }
+      return false;
+    } finally {
+      ensureHostPromise = null;
+    }
+  })();
+  return ensureHostPromise;
 }
 
 function isCommError(err){
@@ -577,11 +671,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (!entry) throw new Error('Unknown stream');
         const i = Number(index || 0);
         if (!Number.isFinite(i) || i < 0) throw new Error('Invalid chunk index');
-        const chunk = entry.chunks[i];
-        if (!chunk) throw new Error('Chunk not found');
+        if (i >= entry.chunkCount) throw new Error('Chunk not found');
+        const offset = i * entry.chunkSize;
+        const len = Math.max(0, Math.min(entry.chunkSize, entry.byteLength - offset));
+        if (!len) throw new Error('Chunk not found');
         // TypedArray clones more reliably than raw ArrayBuffer in some Chrome builds.
-        const u8 = new Uint8Array(chunk);
-        sendResponse({ ok: true, chunk: u8, index: i, last: (i === entry.chunks.length - 1) });
+        const u8 = new Uint8Array(entry.buffer, offset, len);
+        sendResponse({ ok: true, chunk: u8, index: i, last: (i === entry.chunkCount - 1) });
         return;
       }
 
@@ -591,10 +687,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (!entry) throw new Error('Unknown stream');
         const i = Number(index || 0);
         if (!Number.isFinite(i) || i < 0) throw new Error('Invalid chunk index');
-        const chunk = entry.chunks[i];
-        if (!chunk) throw new Error('Chunk not found');
-        const b64 = arrayBufferToBase64(chunk);
-        sendResponse({ ok: true, b64, index: i, last: (i === entry.chunks.length - 1) });
+        if (i >= entry.chunkCount) throw new Error('Chunk not found');
+        const offset = i * entry.chunkSize;
+        const len = Math.max(0, Math.min(entry.chunkSize, entry.byteLength - offset));
+        if (!len) throw new Error('Chunk not found');
+        const u8 = new Uint8Array(entry.buffer, offset, len);
+        const b64 = uint8ToBase64(u8);
+        sendResponse({ ok: true, b64, index: i, last: (i === entry.chunkCount - 1) });
         return;
       }
 
@@ -699,12 +798,15 @@ function dataUrlToBytes(dataUrl) {
   return { bytes, contentType };
 }
 
-function arrayBufferToBase64(buffer){
-  const bytes = new Uint8Array(buffer);
+function uint8ToBase64(bytes){
   let binary = '';
   const chunk = 0x8000;
   for (let i = 0; i < bytes.length; i += chunk) {
     binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
   }
   return btoa(binary);
+}
+
+function arrayBufferToBase64(buffer){
+  return uint8ToBase64(new Uint8Array(buffer));
 }
