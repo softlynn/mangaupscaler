@@ -1,10 +1,16 @@
 # Changelog
 
 ## 0.2.4-alpha
-- Performance: reduce background overhead by incrementally tracking “manga tabs” instead of rescanning all tabs on every event.
-- Performance: de-duplicate concurrent host startup/health checks in the MV3 service worker.
-- Performance: lower AI stream memory churn by storing a single buffer and slicing per chunk.
-- Smoothness: build AI result `Blob`s directly from streamed chunks (avoids extra full-buffer copies).
-- Smoothness: make page prefetch more reliable by holding a short-lived reference to prefetch `Image` objects (avoids early GC canceling requests on some browsers).
-- Stability: unobserve removed `<img>` nodes to keep `IntersectionObserver` bookkeeping clean on infinite-scroll readers.
 
+### ⚡ Performance
+- 🧠 Background: track “manga tabs” incrementally (no more full tab rescans on every event)
+- 🚀 Host startup: de-dupe concurrent `ensureHostRunning()` calls in the MV3 service worker
+- 📦 AI streaming: store one `ArrayBuffer` per result and slice chunks on-demand (less copying)
+
+### 🧈 Smoothness
+- 🧩 AI streaming: build the final `Blob` directly from streamed chunks (avoids extra full-buffer copies)
+- 🕸️ Prefetch: keep short-lived references to prefetch `Image` objects (prevents early-GC request cancels on some browsers)
+- 👀 Preload timing: slightly earlier “near viewport” window when preload slider > 0
+
+### 🛡️ Stability / Compatibility
+- 🧹 Cleanup: unobserve removed `<img>` nodes to keep `IntersectionObserver` bookkeeping clean on infinite-scroll readers
