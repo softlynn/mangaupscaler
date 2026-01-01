@@ -295,11 +295,40 @@ _engine_loading: dict[str, threading.Event] = {}
 _prewarm_started = False
 _wrapped_cache: dict[str, str] = {}
 _model_blocks: dict[str, int] = {}
+_cache_inflight_lock = threading.Lock()
+_cache_inflight: dict[str, threading.Event] = {}
 _last_cache_cleanup = 0.0
 _last_enhance_ts = 0.0
 _idle_stop = threading.Event()
 _active_enhances = 0
 _active_enhances_lock = threading.Lock()
+
+def _dedupe_cache_begin(cache_key: str) -> tuple[bool, threading.Event | None]:
+  """
+  Returns (leader, event). If leader==True, caller should perform the work and then call _dedupe_cache_end().
+  If leader==False, caller should wait on event and then re-check cache on disk.
+  """
+  if not cache_key:
+    return (True, None)
+  with _cache_inflight_lock:
+    evt = _cache_inflight.get(cache_key)
+    if evt is not None:
+      return (False, evt)
+    evt = threading.Event()
+    _cache_inflight[cache_key] = evt
+    return (True, evt)
+
+def _dedupe_cache_end(cache_key: str, evt: threading.Event | None):
+  if not cache_key or evt is None:
+    return
+  try:
+    evt.set()
+  except Exception:
+    pass
+  with _cache_inflight_lock:
+    cur = _cache_inflight.get(cache_key)
+    if cur is evt:
+      _cache_inflight.pop(cache_key, None)
 
 def _pick_height(h: int, scale: int, model_type: str) -> int:
   mp = CFG.get("model_map_by_type", {}).get(model_type, {}).get(str(scale), {})
@@ -1109,23 +1138,41 @@ class Handler(BaseHTTPRequestHandler):
             ctype = "image/webp" if cache_ext == "webp" else "image/png"
             return self._send(200, f.read(), ctype, {"X-MU-Model":"cache"})
 
-        # Download
-        r = requests.get(url, timeout=20, headers={"User-Agent":"MangaUpscalerHost/1.0"})
-        r.raise_for_status()
-        src_bytes = r.content
+        leader, evt = _dedupe_cache_begin(cache_path)
+        if not leader and evt is not None:
+          # Another thread is already enhancing/downloading this exact cache key.
+          # Wait and then serve the cache it wrote (avoids duplicate work).
+          try:
+            evt.wait(timeout=90)
+          except Exception:
+            pass
+          if os.path.exists(cache_path):
+            with open(cache_path, "rb") as f:
+              ctype = "image/webp" if cache_ext == "webp" else "image/png"
+              return self._send(200, f.read(), ctype, {"X-MU-Model":"cache"})
+          # If it failed, fall through and attempt ourselves.
+          leader, evt = (True, evt)
 
-        # Try enhance, fallback to passthrough if missing deps/models
+        # Download
         try:
-          out_bytes, model_name, ctype = enhance_bytes(src_bytes, outscale, quality, out_fmt)
-          with open(cache_path, "wb") as f:
-            f.write(out_bytes)
-          return self._send(200, out_bytes, ctype, {"X-MU-Model": model_name})
-        except Exception as e:
-          # passthrough original image
-          err = (str(e) or e.__class__.__name__).encode("utf-8", "ignore")[:400]
-          _log(f"enhance failed (GET): {err.decode('utf-8','ignore')}")
-          ctype = r.headers.get("content-type","application/octet-stream").split(";")[0]
-          return self._send(200, src_bytes, ctype, {"X-MU-Host-Error": err.decode("utf-8","ignore")})
+          r = requests.get(url, timeout=20, headers={"User-Agent":"MangaUpscalerHost/1.0"})
+          r.raise_for_status()
+          src_bytes = r.content
+
+          # Try enhance, fallback to passthrough if missing deps/models
+          try:
+            out_bytes, model_name, ctype = enhance_bytes(src_bytes, outscale, quality, out_fmt)
+            with open(cache_path, "wb") as f:
+              f.write(out_bytes)
+            return self._send(200, out_bytes, ctype, {"X-MU-Model": model_name})
+          except Exception as e:
+            # passthrough original image
+            err = (str(e) or e.__class__.__name__).encode("utf-8", "ignore")[:400]
+            _log(f"enhance failed (GET): {err.decode('utf-8','ignore')}")
+            ctype = r.headers.get("content-type","application/octet-stream").split(";")[0]
+            return self._send(200, src_bytes, ctype, {"X-MU-Host-Error": err.decode("utf-8","ignore")})
+        finally:
+          _dedupe_cache_end(cache_path, evt)
 
     except Exception as e:
       tb = traceback.format_exc()
@@ -1221,6 +1268,18 @@ class Handler(BaseHTTPRequestHandler):
             ctype = "image/webp" if cache_ext == "webp" else "image/png"
             return self._send(200, f.read(), ctype, {"X-MU-Model":"cache"})
 
+        leader, evt = _dedupe_cache_begin(cache_path)
+        if not leader and evt is not None:
+          try:
+            evt.wait(timeout=90)
+          except Exception:
+            pass
+          if os.path.exists(cache_path):
+            with open(cache_path, "rb") as f:
+              ctype = "image/webp" if cache_ext == "webp" else "image/png"
+              return self._send(200, f.read(), ctype, {"X-MU-Model":"cache"})
+          leader, evt = (True, evt)
+
         try:
           out_bytes, model_name, ctype = enhance_bytes(src_bytes, outscale, quality, out_fmt)
           with open(cache_path, "wb") as f:
@@ -1230,6 +1289,8 @@ class Handler(BaseHTTPRequestHandler):
           err = (str(e) or e.__class__.__name__).encode("utf-8", "ignore")[:400]
           _log(f"enhance failed (POST): {err.decode('utf-8','ignore')}")
           return self._send(200, src_bytes, "application/octet-stream", {"X-MU-Host-Error": err.decode("utf-8","ignore")})
+        finally:
+          _dedupe_cache_end(cache_path, evt)
     except Exception:
       tb = traceback.format_exc()
       _log(tb)

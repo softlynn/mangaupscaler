@@ -7,6 +7,7 @@
 - 🚀 Host startup: de-dupe concurrent `ensureHostRunning()` calls in the MV3 service worker
 - 📦 AI streaming: store one `ArrayBuffer` per result and slice chunks on-demand (less copying)
 - 🔁 Model switching: cache multiple engines + prewarm common models to reduce slowdowns when flipping color ↔ B/W pages
+- 🧵 Host cache: de-dupe concurrent identical `/enhance` requests (prevents duplicated downloads/AI work)
 
 ### 🧈 Smoothness
 - 🧩 AI streaming: build the final `Blob` directly from streamed chunks (avoids extra full-buffer copies)
