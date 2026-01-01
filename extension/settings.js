@@ -11,7 +11,8 @@ const DEFAULTS = {
   cacheMaxGb: 1.0,
   cacheMaxAgeDays: 0,
   idleShutdownMinutes: 5,
-  telemetryEnabled: false
+  telemetryEnabled: true,
+  telemetryUploadUrl: 'https://script.google.com/macros/s/AKfycbzva5kasl0U0QgZc8tAFzcbERqdL98S8rjRdjY8by4C8yINApPSRH3qZaU3OReknQz7/exec'
 };
 
 const POPULAR = [
@@ -114,6 +115,7 @@ async function readUIIntoSettings(){
   s.showToast = getToggle($('showToast'));
   s.allowDat2 = getToggle($('allowDat2'));
   s.telemetryEnabled = getToggle($('telemetryEnabled'));
+  s.telemetryUploadUrl = String($('telemetryUploadUrl')?.value || '').trim();
   s.aiQuality = String($('aiQuality')?.value || s.aiQuality || 'balanced');
   s.scale = Number($('scale').value) || 3;
   s.preUpscaleCount = Number($('preUpscaleCount').value) || 0;
@@ -176,6 +178,7 @@ async function init(){
   setToggle($('showToast'), s.showToast);
   setToggle($('allowDat2'), s.allowDat2);
   setToggle($('telemetryEnabled'), !!s.telemetryEnabled);
+  if ($('telemetryUploadUrl')) $('telemetryUploadUrl').value = String(s.telemetryUploadUrl || '');
   $('aiQuality').value = String(s.aiQuality || 'balanced');
 
   $('scale').value = String(s.scale||3);

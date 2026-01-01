@@ -15,7 +15,7 @@ const DEFAULTS = {
   aiQuality: 'balanced',       // fast/balanced/best
   whitelist: {},               // {hostname:true}
   showToast: true,
-  telemetryEnabled: false
+  telemetryEnabled: true
 };
 
 let settings = { ...DEFAULTS };

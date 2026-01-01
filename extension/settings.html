@@ -129,9 +129,16 @@
       <div class="row">
         <div>
           <div class="label">Share anonymous diagnostics</div>
-          <div class="sub">Helps improve compatibility. Never sends images or full URLs.</div>
+          <div class="sub">Helps improve compatibility. Never sends images or full URLs. You can turn this off anytime.</div>
         </div>
         <div id="telemetryEnabled" class="toggle"><div class="knob"></div></div>
+      </div>
+      <div class="row">
+        <div>
+          <div class="label">Upload endpoint (optional)</div>
+          <div class="sub">If set, the extension will POST diagnostics to this URL. Leave blank to keep diagnostics local-only.</div>
+        </div>
+        <input id="telemetryUploadUrl" type="url" placeholder="https://your-server.example/telemetry" style="min-width: 320px; flex: 1;" />
       </div>
       <div class="row">
         <div>
@@ -142,6 +149,12 @@
       </div>
       <p class="hint">
         Collected fields are limited to: site hostname, a redacted path signature, image/lazyload counts, and timing/errors for enhance/preload.
+      </p>
+      <p class="hint">
+        Note: your upload endpoint must accept cross-origin POSTs from a Chrome extension (or you can use a simple webhook that ignores the Origin header).
+      </p>
+      <p class="hint">
+        Uploading happens only when diagnostics are enabled above.
       </p>
     </section>
 

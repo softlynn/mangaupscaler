@@ -45,12 +45,46 @@ const AI_STREAM_CHUNK_SIZE = 256 * 1024; // 256KB
 const aiStreamStore = new Map(); // id -> { chunks: ArrayBuffer[], byteLength, contentType, model, hostError, elapsedMs, createdAt }
 let tabScanTimer = null;
 let lastTrayState = null; // 'running' | 'stopped' | null
+let telemetryCfg = null; // { enabled: boolean, uploadUrl: string }
+let telemetryClientId = null;
 
 function newStreamId(){
   try{
     if (crypto?.randomUUID) return crypto.randomUUID();
   } catch {}
   return `${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
+}
+
+async function loadTelemetryCfg(){
+  if (telemetryCfg) return telemetryCfg;
+  try{
+    const s = await chrome.storage.sync.get({ telemetryEnabled: false, telemetryUploadUrl: '' });
+    telemetryCfg = {
+      enabled: !!s.telemetryEnabled,
+      uploadUrl: String(s.telemetryUploadUrl || '').trim()
+    };
+    return telemetryCfg;
+  } catch {
+    telemetryCfg = { enabled: false, uploadUrl: '' };
+    return telemetryCfg;
+  }
+}
+
+async function getTelemetryClientId(){
+  if (telemetryClientId) return telemetryClientId;
+  try{
+    const s = await chrome.storage.local.get({ telemetryClientId: '' });
+    let id = String(s.telemetryClientId || '').trim();
+    if (!id) {
+      id = newStreamId();
+      await chrome.storage.local.set({ telemetryClientId: id });
+    }
+    telemetryClientId = id;
+    return id;
+  } catch {
+    telemetryClientId = newStreamId();
+    return telemetryClientId;
+  }
 }
 
 function splitArrayBuffer(buffer, chunkSize){
@@ -110,6 +144,7 @@ chrome.windows.onRemoved.addListener(() => scheduleTrayReconcile('window_removed
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'sync') return;
   if (changes.enabled || changes.whitelist) scheduleTrayReconcile('settings_changed');
+  if (changes.telemetryEnabled || changes.telemetryUploadUrl) telemetryCfg = null;
 });
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
@@ -268,21 +303,54 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     try {
       if (msg?.type === 'TELEMETRY_EVENT') {
-        const payload = msg.payload || {};
-        // Never start the host just for telemetry.
-        if (!await pingHost()) { sendResponse({ ok: true, dropped: true }); return; }
-        try{
-          const resp = await fetch(`${AI_HOST}/telemetry`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-          });
-          sendResponse({ ok: resp.ok });
-          return;
-        } catch {
-          sendResponse({ ok: false });
-          return;
+        const cfg = await loadTelemetryCfg();
+        if (!cfg.enabled) { sendResponse({ ok: true, dropped: true }); return; }
+
+        const payload = { ...(msg.payload || {}) };
+        payload.clientId = await getTelemetryClientId();
+
+        const tasks = [];
+        let localOk = null;
+        let remoteOk = null;
+
+        // Local host telemetry (viewable at /telemetry/recent). Never start the host just for telemetry.
+        if (await pingHost()) {
+          tasks.push((async () => {
+            try{
+              const resp = await fetch(`${AI_HOST}/telemetry`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+              });
+              localOk = resp.ok;
+            } catch {
+              localOk = false;
+            }
+          })());
+        } else {
+          localOk = false;
         }
+
+        // Optional remote upload (user-configured). Server must accept cross-origin POSTs from extensions.
+        if (cfg.uploadUrl && /^https?:\/\//i.test(cfg.uploadUrl)) {
+          tasks.push((async () => {
+            try{
+              const resp = await fetch(cfg.uploadUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                referrerPolicy: 'no-referrer',
+                body: JSON.stringify(payload)
+              });
+              remoteOk = resp.ok;
+            } catch {
+              remoteOk = false;
+            }
+          })());
+        }
+
+        await Promise.allSettled(tasks);
+        sendResponse({ ok: true, localOk, remoteOk });
+        return;
       }
 
       if (msg?.type === 'FETCH_IMAGE_DATAURL') {
